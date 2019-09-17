@@ -31,19 +31,42 @@ void * ack_thread(void * arg){
             err_handler(who, "recvfrom");
         }
         if (ack_pack.ack == 1) {
-            if(ack_pack.ack_num <= wnd->sup && ack_pack.ack_num > wnd->inf){
-                wnd->acked[ack_pack.ack_num % N] = 1;
-                printf("\nACK: %d\n", ack_pack.ack_num);//todo
-                if(ack_pack.ack_num == wnd->inf + 1){
-                    while((wnd->acked[(wnd->inf+1) % N] == 1) && (wnd->inf < wnd->sup)){
-                        wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
-                        printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+            if (wnd->sup > wnd->inf) {
+                if (ack_pack.ack_num <= wnd->sup && ack_pack.ack_num > wnd->inf) {
+                    wnd->acked[ack_pack.ack_num % N] = 1;
+                    printf("\nACK: %d\n", ack_pack.ack_num);//todo
+                    if (ack_pack.ack_num == wnd->inf + 1) {
+                        while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
+                            wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
+                            printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                        }
+                    }
+                }
+            }
+            if (wnd->sup < wnd->inf) {
+                if (ack_pack.ack_num <= wnd->sup || ack_pack.ack_num > wnd->inf) {
+                    wnd->acked[ack_pack.ack_num % N] = 1;
+                    printf("\nACK: %d\n", ack_pack.ack_num);//todo
+                    if (ack_pack.ack_num == (wnd->inf + 1)%MAX_SEQ_NUM) {
+                        while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf > wnd->sup)) {
+                            wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
+                            printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                        }
+                        if(wnd->sup > wnd->inf) {
+                            while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
+                                wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
+                                printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                            }
+                        }
                     }
                 }
             }
         } else {
-            printf("\nTHREAD ESCE\n");
-            pthread_exit(0);
+            //CONFERMA RICEZIONE SERVER
+            if(ack_pack.fin == 1) {
+                printf("\nTHREAD ESCE\n");
+                pthread_exit(0);
+            }
         }
     }
 }
@@ -116,6 +139,35 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
     return 0;
 }
 
+void * send_thread(void * arg){
+    int slot = 0;
+    struct send_thread_args *args = (struct send_thread_args *)arg;
+
+    while(1) {
+        while(args->slots[slot] == 0);
+        if((args->ready[slot].seq_num - args->wnd->inf) > 0) {
+            while((args->ready[slot].seq_num - args->wnd->inf) > N);
+        }
+        else if((args->ready[slot].seq_num - args->wnd->inf) < 0) {
+            while(((MAX_SEQ_NUM - (args->wnd->inf - args->ready[slot].seq_num)) > N) &&
+                                                            ((args->ready[slot].seq_num - args->wnd->inf) < 0));
+        }
+        args->wnd->wnd_buff[args->ready[slot].seq_num % N] = args->ready[slot];
+        args->wnd->acked[args->ready[slot].seq_num % N] = 0;
+        args->wnd->sup = args->ready[slot].seq_num;
+        send_packet(args->sockfd, args->ready[slot], args->servaddr);///SCARTA CON PROBABILITA p-------------------
+
+        printf("\ninviato pack: %d\n", args->ready[slot].seq_num);//todo
+
+        args->slots[slot] = 0;
+        if(args->ready[slot].last == 1) {
+            printf("\nsend_thread exit\n");
+            pthread_exit(0);
+        }
+        slot = (slot + 1) % READY_SIZE;
+    }
+}
+
 void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     int actread;
     int fd, res;
@@ -179,17 +231,17 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     }
     //wnd.wnd_buff[pack.seq_num % N] = pack;//timer--------------------------------------------------------
 
-    pthread_t tid;////----------------------------------------------------------------------
+    pthread_t tid[2];////----------------------------------------------------------------------
     struct ack_thread_args args;
     args.sockfd = sockfd;
     args.wnd = &wnd;
-    res = pthread_create(&tid, NULL, ack_thread, (void*)&args);//---------------------------
+    res = pthread_create(&tid[0], NULL, ack_thread, (void*)&args);//---------------------------
     if(res == -1){
         err_handler(who, "pthread_create");
     }
 
     wnd.wnd_buff[pack.seq_num % N] = pack;//---------------------------------------
-    send_packet(sockfd, pack, servaddr);//azionare timer
+    send_packet(sockfd, pack, servaddr);
     ///////////////////////////////////////////////////////////////////////////////
     while((wnd.sup - wnd.inf) != 0);
 
@@ -202,6 +254,45 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     actread = 0;
     pack.ack = 0;
     memset((void*)pack.data, 0, sizeof(DATA_SIZE));
+
+    //-------------------------------//////////////////////////////////////00000000000000000000000000000000000000000
+
+    struct send_thread_args send_args;
+    send_args.sockfd = sockfd;
+    send_args.wnd = &wnd;
+    send_args.servaddr = servaddr;
+    for(int i;i<READY_SIZE;i++){
+        send_args.slots[i] = 0;
+    }
+    res = pthread_create(&tid[1], NULL, send_thread, (void*)&send_args);
+    if(res == -1){
+        err_handler(who, "pthread_create");
+    }
+    int slot = 0;
+    while((res = read(fd, (void*)&(pack.data[actread]), 1)) != 0){//BUFFER CON PACCHETTI PRONTI DA SPEDIRE todo
+        if(res == -1){
+            if(errno != EINTR){
+                err_handler(who, "read");
+            }
+        }
+        actread++;
+        actread = actread % DATA_SIZE;
+        if(actread == DATA_SIZE - 1){
+            pack.data[actread] = '\0';
+            actread++;
+            actread = actread % DATA_SIZE;
+            pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
+
+            while(send_args.slots[slot] == 1);
+            send_args.ready[slot] = pack;
+            send_args.slots[slot] = 1;
+            slot = (slot + 1)%READY_SIZE;
+
+            memset((void*)pack.data, 0, DATA_SIZE);
+        }
+    }
+
+/*
     while((res = read(fd, (void*)&(pack.data[actread]), 1)) != 0){//BUFFER CON PACCHETTI PRONTI DA SPEDIRE todo
         if(res == -1){
             if(errno != EINTR){
@@ -233,10 +324,14 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
 
             memset((void*)pack.data, 0, DATA_SIZE);
         }
-    }
+    }*/
     pack.last = 1;
     pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-    ////CONTROLLO FINESTRA-------------------------------------------------------------
+
+    while(send_args.slots[slot] == 1);
+    send_args.ready[slot] = pack;
+    send_args.slots[slot] = 1;
+   /* ////CONTROLLO FINESTRA-------------------------------------------------------------
     if((pack.seq_num - wnd.inf) > 0){
         while((pack.seq_num - wnd.inf) > N);
     }
@@ -249,10 +344,12 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     wnd.sup = pack.seq_num;//////////PRIMA DI SPEDIRE
     //printf("\ncontenuto: \n %s \n", pack.data);
     send_packet(sockfd, pack, servaddr);
-    printf("\ninviato pack: %d\n", pack.seq_num);//todo
+    printf("\ninviato pack: %d\n", pack.seq_num);//todo*/
 
     //for(int n=0;n<N;n++){
-        while(wnd.acked[wnd.sup%N] == 0);
+    for(int i=0;i<2;i++){
+        pthread_join(tid[i], NULL);
+    }
     //}
    /* while(semop(sem_stdout, &w_stdo, 1) == -1){
         if(errno != EINTR){

@@ -113,7 +113,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                     wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
                     wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
                     ack_pack.ack_num = pack.seq_num;
-                    sleep(1);
+                    //sleep(1);//todo
                     printf("\ninviato ACK: %d\n", pack.seq_num);//todo
                     send_ctrl_packet(sockfd, ack_pack, addr);
                     if(pack.seq_num == wnd.inf + 1){
@@ -125,10 +125,14 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                                 err_handler(who, "fprintf");
                             }
                             fflush(file);
-                            if(pack.last == 1){/////ESCI SE TUTTO IN BUFF SALVATO
+                            if(wnd.wnd_buff[(wnd.inf+1)%N].last == 1){/////ESCI SE TUTTO IN BUFF SALVATO
                                 printf("\nServer saved %s successfully\n", path);
+                                ack_pack.ack = 0;
+                                ack_pack.fin = 1;
+                                send_ctrl_packet(sockfd, ack_pack, addr);
                                 exit(0);
                             }
+                            wnd.acked[(wnd.inf + 1) % N] = 0;//--------------------------------------------
                             wnd.inf = (wnd.inf + 1)%MAX_SEQ_NUM;
 
                         }
@@ -181,7 +185,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                         if(wnd.sup < wnd.inf){
                             var = MAX_SEQ_NUM + wnd.sup;
                         }
-                        while((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)){
+                        while((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)){
                             //scrivi su file(ACKED A 0) da wnd_buff THREAD
                             wnd.inf = (wnd.inf + 1)%MAX_SEQ_NUM;
                             if(wnd.sup > wnd.inf){
