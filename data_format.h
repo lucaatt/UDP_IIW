@@ -2,8 +2,9 @@
 #define UDP_IIW_DATA_FORMAT_H
 
 #define DATA_SIZE 1484
-#define N 3
+#define N 2
 #define MAX_SEQ_NUM 60000
+#define READY_SIZE 5
 //window size
 
 typedef struct packet{
@@ -35,5 +36,13 @@ typedef struct ack_thread_args{
     struct window *wnd;
     int sockfd;
 }ack_thread_args;
+
+typedef struct send_thread_args{
+    struct window *wnd;
+    struct packet ready[READY_SIZE];
+    short slots[READY_SIZE];
+    struct sockaddr_in servaddr;
+    int sockfd;
+}send_thread_args;
 
 #endif
