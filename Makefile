@@ -1,12 +1,12 @@
 makeall:
-	gcc -c ClientAdam.c
-	gcc -c ServerAdam.c
+	gcc -c Client.c
+	gcc -c Server.c
 	gcc -c shared_functions.c
-	gcc -o client ClientAdam.o shared_functions.o -pthread
-	gcc -o server ServerAdam.o shared_functions.o
+	gcc -o client Client.o shared_functions.o -pthread
+	gcc -o server Server.o shared_functions.o -pthread
 cleanall:
-	rm ClientAdam.o
-	rm ServerAdam.o
+	rm Client.o
+	rm Server.o
 	rm shared_functions.o
 	rm client
 	rm server
