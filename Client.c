@@ -171,16 +171,19 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
         err_handler(who, "malloc");
     }
 
+    memset((void*)&ack_pack, 0, sizeof(ack_pack));
+
     memset((void *) &pack, 0, sizeof(pack));
 
+    ack_pack.cmd = 2;
 
     res = handshake_client(sockfd, &ack_pack, &servaddr);
     if (res == -1) {
         err_handler(who, "handshake_client");
     }
 
-    pack.seq_num = 1;
-    pack.ack_num = 0;
+    //pack.seq_num = 1;
+    //pack.ack_num = 0;
 
     w_stdo.sem_num = 0;
     w_stdo.sem_op = -1;
@@ -206,9 +209,11 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     }
     printf("\nfilename in data %s\n",filename);
 
+    pack.ack = 1;
+    pack.ack_num = 0;
+    pack.seq_num = 1;
     send_packet(sockfd, pack, servaddr);
-    ack_pack.ack = 1;
-    ack_pack.ack_num = pack.seq_num;
+
     //printf("ACK: %d\n", ack_pack.ack_num);
     //send_ctrl_packet(sockfd, ack_pack, servaddr);
 
@@ -223,6 +228,8 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     if (file == NULL) {
         err_handler(who, "fdopen");
     }*/
+    ack_pack.ack = 1;
+    ack_pack.ack_num = 1;
     while (1) {
 
         memset((void *) pack.data, 0, sizeof(DATA_SIZE));

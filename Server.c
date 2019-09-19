@@ -33,6 +33,7 @@ int handshake_server(int sockfd, struct ctrl_packet *ctrl_pack, struct packet *p
         res = recvfrom(sockfd, (void *) pack, sizeof(*pack), 0,
                        (struct sockaddr *) addr, &len);//////////if res < size pack non mandare ack
         if (res < 0) {
+            printf("errore in res <0 \n");
             return -1;
         }
 
@@ -40,13 +41,16 @@ int handshake_server(int sockfd, struct ctrl_packet *ctrl_pack, struct packet *p
         //verifying ack
         if (pack->ack == 1) {
             if (pack->ack_num != snd_pack.seq_num) {
+                printf("errore in secondo if\n");
                 return -1;
             }
             if (pack->seq_num != (ctrl_pack->seq_num) + 1) {
+                printf("errore in terzo if\n");
                 return -1;
             }
             return 0;
         } else {
+            printf("errore in pack ack\n");
             return -1;
         }
     }
@@ -170,13 +174,11 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
         memset((void *) &wnd, 0, sizeof(wnd));
         filename = (char *) malloc(MAX_FILENAME_SIZE);
         if (filename == NULL) {
-            close(sockfd);
             err_handler(who, "malloc");
         }
 
         res = sprintf(filename, "%s", pack.data);
         if (res < 0) {
-            close(sockfd);
             err_handler(who, "sprintf");
         }
         pack.seq_num = pack.ack_num + 1;
@@ -364,7 +366,6 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
         args.wnd = &wnd;
         res = pthread_create(&tid, NULL, ack_thread, (void *) &args);
         if (res == -1) {
-            close(sockfd);
             err_handler(who, "pthread_create");
         }
 
@@ -384,7 +385,6 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
         while ((res = read(fd, (void *) &(pack.data[actread]), 1)) != 0) {
             if (res == -1) {
                 if (errno != EINTR) {
-                    close(sockfd);
                     err_handler(who, "read");
                 }
             }
