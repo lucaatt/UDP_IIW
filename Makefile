@@ -3,7 +3,7 @@ makeall:
 	gcc -c Server.c
 	gcc -c shared_functions.c
 	gcc -o client Client.o shared_functions.o -pthread -lrt
-	gcc -o server Server.o shared_functions.o -pthread
+	gcc -o server Server.o shared_functions.o -pthread -lrt
 cleanall:
 	rm Client.o
 	rm Server.o

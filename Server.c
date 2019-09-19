@@ -116,7 +116,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
     wnd.sup = pack.seq_num;
 
     len = sizeof(addr);
-    printf(who, "%s", "Server request_handler");
+    sprintf(who, "%s", "Server request_handler");
 
 
 
@@ -261,7 +261,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                     wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
                     wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
                     ack_pack.ack_num = pack.seq_num;
-                    sleep(1);
+                    sleep(5);//todo
                     printf("\ninviato ACK: %d\n", pack.seq_num);//todo
                     send_ctrl_packet(sockfd, ack_pack, addr);
                     if (pack.seq_num == wnd.inf + 1) {
@@ -270,14 +270,17 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                             res = fprintf(file, "%s", wnd.wnd_buff[(wnd.inf + 1) % N].data);
                             printf("\nscritto: %d\n", wnd.inf + 1);//todo
                             if (res < 0) {
-                                close(sockfd);
                                 err_handler(who, "fprintf");
                             }
                             fflush(file);
-                            if (pack.last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
+                            if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
                                 printf("\nServer saved %s successfully\n", path);
+                                ack_pack.ack = 0;
+                                ack_pack.fin = 1;
+                                send_ctrl_packet(sockfd, ack_pack, addr);
                                 exit(0);
                             }
+                            wnd.acked[(wnd.inf + 1) % N] = 0;//--------------------------------------------
                             wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
 
                         }
@@ -326,7 +329,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                         if (wnd.sup < wnd.inf) {
                             var = MAX_SEQ_NUM + wnd.sup;
                         }
-                        while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)) {
+                        while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)) {
                             //scrivi su file(ACKED A 0) da wnd_buff THREAD
                             wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
                             if (wnd.sup > wnd.inf) {
@@ -411,19 +414,15 @@ int main(int argc, char *argv[]) {
         if (res == -1) {
             err_handler(who, "handshake_server");
         }
-        if (cmd == 4) {
-            printf("\nClosing...\n");
-            exit(0);
-        } else {
-            pid = fork();
-            if (pid == -1) {
-                err_handler(who, "fork");
-            }
-            if (pid == 0) {
-                request_handler(connection_sockfd, pack, cmd, addr);
-
-            }
+        pid = fork();
+        if (pid == -1) {
+            err_handler(who, "fork");
         }
+        if (pid == 0) {
+            request_handler(connection_sockfd, pack, cmd, addr);
+
+        }
+
 
     }
 }

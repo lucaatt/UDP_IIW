@@ -9,41 +9,104 @@ void event_handler() {
     printf("\n");
 }
 
+void retransmission_thread(union sigval arg){
+    //union sigval * ptr = (union sigval *)arg;
+    //printf("\nretx thr starting %d\n", timer_num);
+    struct ack_thread_args *args = (struct ack_thread_args *)arg.sival_ptr;
+    int timer_num = args->timer_num;
+    struct window *wnd= args->wnd;
+    int sockfd = args->sockfd;
+    //int timer_num = arg.sival_int;
+    //printf("\nretx thr starting %d\n", 4);
+    int res;
+
+    struct itimerspec timeout;
+
+    timeout.it_value.tv_sec = DEF_TO_SEC;
+    timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    timeout.it_interval.tv_sec = 0;
+    timeout.it_interval.tv_nsec = 0;
+
+    timer_t timer = args->timers[timer_num];
+
+    send_packet(sockfd, wnd->wnd_buff[timer_num], args->servaddr);///SCARTA CON PROBABILITA p-------------------
+
+    ///////////////////////////////////SET TIMER
+    res = timer_settime(timer, 0, &timeout, NULL);
+    if(res == -1){
+        err_handler("retx thread", "settime");
+    }
+    printf("\nritrasmissione pack: %d\n", wnd->wnd_buff[timer_num].seq_num);//todo
+    pthread_exit(0);
+}
+
 /*
  * Gestisce la ricezione degli ACK e lo spostamento della finestra di spedizione
  */
-void *ack_thread(void *arg) {
-    struct ack_thread_args *args = (struct ack_thread_args *) arg;
+void * ack_thread(void * arg){
+    struct ack_thread_args *args = (struct ack_thread_args *)arg;
     struct window *wnd;
     int sockfd, res;
     struct ctrl_packet ack_pack;
     char who[30];
     int n;
 
-    sprintf(who, "%s", "Client ack_thread");
-    wnd = args->wnd;
-    sockfd = args->sockfd;
+    printf("\nFUNZIONA\n");
+    struct itimerspec stop_to;
 
-    while (1) {//GESTIRE MAX_SEQ_NUM
+    stop_to.it_value.tv_sec = 0;
+    stop_to.it_value.tv_nsec = 0;
+    stop_to.it_interval.tv_sec = 0;
+    stop_to.it_interval.tv_nsec = 0;
+
+    sprintf(who, "%s", "Client ack_thread");
+    wnd = args -> wnd;
+    sockfd = args -> sockfd;
+
+    while(1) {//GESTIRE MAX_SEQ_NUM
 
         res = recvfrom(sockfd, (void *) &ack_pack, sizeof(ack_pack), 0, NULL, NULL);
         if (res < 0) {
             err_handler(who, "recvfrom");
         }
         if (ack_pack.ack == 1) {
-            if (ack_pack.ack_num <= wnd->sup && ack_pack.ack_num > wnd->inf) {
-                wnd->acked[ack_pack.ack_num % N] = 1;
-                printf("\nACK: %d\n", ack_pack.ack_num);//todo
-                if (ack_pack.ack_num == wnd->inf + 1) {
-                    while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
-                        wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
-                        printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+            if (wnd->sup > wnd->inf) {
+                if (ack_pack.ack_num <= wnd->sup && ack_pack.ack_num > wnd->inf) {
+                    timer_settime(args->timers[ack_pack.ack_num % N], 0, &stop_to, NULL);
+                    wnd->acked[ack_pack.ack_num % N] = 1;
+                    printf("\nACK: %d\n", ack_pack.ack_num);//todo
+                    if (ack_pack.ack_num == wnd->inf + 1) {
+                        while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
+                            wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
+                            printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                        }
+                    }
+                }
+            }
+            if (wnd->sup < wnd->inf) {
+                if (ack_pack.ack_num <= wnd->sup || ack_pack.ack_num > wnd->inf) {
+                    wnd->acked[ack_pack.ack_num % N] = 1;
+                    printf("\nACK: %d\n", ack_pack.ack_num);//todo
+                    if (ack_pack.ack_num == (wnd->inf + 1)%MAX_SEQ_NUM) {
+                        while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf > wnd->sup)) {
+                            wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
+                            printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                        }
+                        if(wnd->sup > wnd->inf) {
+                            while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
+                                wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
+                                printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                            }
+                        }
                     }
                 }
             }
         } else {
-            printf("\nTHREAD ESCE\n");
-            pthread_exit(0);
+            //CONFERMA RICEZIONE SERVER
+            if(ack_pack.fin == 1) {
+                printf("\nTHREAD ESCE\n");
+                pthread_exit(0);
+            }
         }
     }
 }
@@ -285,7 +348,49 @@ void close_server(int sockfd, struct sockaddr_in servaddr){
     }
 }
 
-void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
+void * send_thread(void * arg){
+    int slot = 0;
+    int res;
+    struct send_thread_args *args = (struct send_thread_args *)arg;
+    struct itimerspec timeout;
+
+    timeout.it_value.tv_sec = DEF_TO_SEC;
+    timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    timeout.it_interval.tv_sec = 0;
+    timeout.it_interval.tv_nsec = 0;
+
+
+    while(1) {
+        while(args->slots[slot] == 0);
+        if((args->ready[slot].seq_num - args->wnd->inf) > 0) {
+            while((args->ready[slot].seq_num - args->wnd->inf) > N);
+        }
+        else if((args->ready[slot].seq_num - args->wnd->inf) < 0) {
+            while(((MAX_SEQ_NUM - (args->wnd->inf - args->ready[slot].seq_num)) > N) &&
+                  ((args->ready[slot].seq_num - args->wnd->inf) < 0));
+        }
+        args->wnd->wnd_buff[args->ready[slot].seq_num % N] = args->ready[slot];
+        args->wnd->acked[args->ready[slot].seq_num % N] = 0;
+        args->wnd->sup = args->ready[slot].seq_num;
+        send_packet(args->sockfd, args->ready[slot], args->servaddr);///SCARTA CON PROBABILITA p-------------------
+
+        ///////////////////////////////////SET TIMER
+        res = timer_settime(args->timers[args->ready[slot].seq_num % N], 0, &timeout, NULL);
+        if(res == -1){
+            err_handler("send thread", "settime");
+        }
+        printf("\ninviato pack: %d\n", args->ready[slot].seq_num);//todo
+
+        args->slots[slot] = 0;
+        if(args->ready[slot].last == 1) {
+            printf("\nsend_thread exit\n");
+            pthread_exit(0);
+        }
+        slot = (slot + 1) % READY_SIZE;
+    }
+}
+
+void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     int actread;
     int fd, res;
     char buff[1024], *filename, who[11];
@@ -296,15 +401,22 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     pid_t ppid;
     int n;
 
+
+    struct send_thread_args send_args;
+    struct ack_thread_args args[N];
+    struct sigevent sig_to;
+
+
+
     ppid = getppid();
-    memset((void *) &ctrl_pack, 0, sizeof(ctrl_pack));
-    memset((void *) &wnd, 0, sizeof(wnd));////-----------------------------------------------
+    memset((void*)&ctrl_pack, 0, sizeof(ctrl_pack));
+    memset((void*)&wnd, 0, sizeof(wnd));////-----------------------------------------------
 
     sprintf(who, "%s", "Client PUT");
     ctrl_pack.cmd = 1;
 
     res = handshake_client(sockfd, &ctrl_pack, &servaddr);
-    if (res == -1) {
+    if(res == -1){
         err_handler(who, "handshake_client");
     }
 
@@ -315,9 +427,9 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     s_stdo.sem_op = 1;
     s_stdo.sem_flg = 0;
 
-    memset((void *) &pack, 0, sizeof(pack));
-    filename = (char *) malloc(MAX_FILENAME_SIZE);
-    if (filename == NULL) {
+    memset((void*)&pack, 0, sizeof(pack));
+    filename = (char *)malloc(MAX_FILENAME_SIZE);
+    if(filename == NULL) {
         err_handler(who, "malloc");
     }
 
@@ -325,12 +437,12 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
 
     getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
     res = semop(sem_stdout, &s_stdo, 1);
-    if (res == -1) {
+    if(res == -1){
         err_handler(who, "semop");
     }
 
     res = sprintf(pack.data, "%s", filename);
-    if (res < 0) {
+    if(res < 0){
         err_handler(who, "sprintf");
     }
     pack.seq_num = ctrl_pack.seq_num + 1;// % MAX_SEQ_NUM
@@ -343,53 +455,135 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
 
     wnd.inf = pack.seq_num - 1;
     wnd.sup = pack.seq_num;
-    for (n = 0; n < N; n++) {///******---------------------------------------------------------
+    for(n=0;n<N;n++){///******---------------------------------------------------------
         wnd.acked[n] = 0;
     }
     //wnd.wnd_buff[pack.seq_num % N] = pack;//timer--------------------------------------------------------
 
-    pthread_t tid;////----------------------------------------------------------------------
-    struct ack_thread_args args;
-    args.sockfd = sockfd;
-    args.wnd = &wnd;
-    res = pthread_create(&tid, NULL, ack_thread, (void *) &args);//---------------------------
-    if (res == -1) {
+    pthread_t tid[2];////----------------------------------------------------------------------
+
+    //args.sockfd = sockfd;
+    //args.wnd = &wnd;
+
+    sig_to.sigev_notify = SIGEV_THREAD;
+    sig_to.sigev_notify_function = &retransmission_thread;
+    //sig_to.sigev_notify_function = &ack_thread;
+    //sig_to.sigev_value.sival_ptr = (void*)&args;
+    timer_t timers[N];
+    send_args.timers = timers;
+    //args.timers = timers;
+    for(int i=0;i<N;i++){
+        //sig_to.sigev_value.sival_int = i;
+        sig_to.sigev_value.sival_ptr = (void*)&args[i];
+        args[i].sockfd = sockfd;
+        args[i].wnd = &wnd;
+        args[i].timer_num = i;
+        args[i].timers = timers;
+        args[i].servaddr = servaddr;
+        timer_create(CLOCK_MONOTONIC, &sig_to, &timers[i]);
+        //send_args.timers[i] = timers[i];
+        //args.timers[i] = timers[i];
+    }
+/*
+    struct itimerspec timeout;
+
+    timeout.it_value.tv_sec = 1;
+    timeout.it_value.tv_nsec = 0;
+    timeout.it_interval.tv_sec = 0;
+    timeout.it_interval.tv_nsec = 0;
+    timer_settime(timers[1], 0, &timeout, NULL);
+
+    while(1){
+        ;
+    }
+
+*/
+    res = pthread_create(&tid[0], NULL, ack_thread, (void*)&args[0]);//---------------------------
+    if(res == -1){
         err_handler(who, "pthread_create");
     }
 
     wnd.wnd_buff[pack.seq_num % N] = pack;//---------------------------------------
-    send_packet(sockfd, pack, servaddr);//azionare timer
-    ///////////////////////////////////////////////////////////////////////////////
-    while ((wnd.sup - wnd.inf) != 0);
+    send_packet(sockfd, pack, servaddr);//METTERE SOPRA PRIMA DI THREAD
+    ///////////////////////////////////////////////////////////////////////////////SET TIMER
+    while((wnd.sup - wnd.inf) != 0);
 
     sprintf(buff, "./client_files/%s", filename);
-    while ((fd = open(buff, O_RDONLY)) == -1) {
-        if (errno != EINTR) {
+    while((fd = open(buff, O_RDONLY)) == -1){
+        if(errno != EINTR){
             err_handler(who, "open");
         }
     }
     actread = 0;
     pack.ack = 0;
-    memset((void *) pack.data, 0, sizeof(DATA_SIZE));
-    while ((res = read(fd, (void *) &(pack.data[actread]), 1)) != 0) {//BUFFER CON PACCHETTI PRONTI DA SPEDIRE todo
-        if (res == -1) {
-            if (errno != EINTR) {
+    memset((void*)pack.data, 0, sizeof(DATA_SIZE));
+
+    //-------------------------------//////////////////////////////////////00000000000000000000000000000000000000000
+
+
+    send_args.sockfd = sockfd;
+    send_args.wnd = &wnd;
+    send_args.servaddr = servaddr;
+
+    //args.servaddr = servaddr;
+
+    for(int i;i<READY_SIZE;i++){
+        send_args.slots[i] = 0;
+    }
+    res = pthread_create(&tid[1], NULL, send_thread, (void*)&send_args);
+    if(res == -1){
+        err_handler(who, "pthread_create");
+    }
+    int slot = 0;
+    while((res = read(fd, (void*)&(pack.data[actread]), 1)) != 0){//BUFFER CON PACCHETTI PRONTI DA SPEDIRE todo
+        if(res == -1){
+            if(errno != EINTR){
                 err_handler(who, "read");
             }
         }
         actread++;
         actread = actread % DATA_SIZE;
-        if (actread == DATA_SIZE - 1) {
+        if(actread == DATA_SIZE - 1){
+            pack.data[actread] = '\0';
+            actread++;
+            actread = actread % DATA_SIZE;
+            pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
+
+            while(send_args.slots[slot] == 1);
+            send_args.ready[slot] = pack;
+            send_args.slots[slot] = 1;
+            slot = (slot + 1)%READY_SIZE;
+
+            memset((void*)pack.data, 0, DATA_SIZE);
+
+
+
+            sleep(13);
+            printf("\nUSCITO DA PAUSE\n");//todo
+        }
+    }
+
+/*
+    while((res = read(fd, (void*)&(pack.data[actread]), 1)) != 0){//BUFFER CON PACCHETTI PRONTI DA SPEDIRE todo
+        if(res == -1){
+            if(errno != EINTR){
+                err_handler(who, "read");
+            }
+        }
+        actread++;
+        actread = actread % DATA_SIZE;
+        if(actread == DATA_SIZE - 1){
             pack.data[actread] = '\0';
             actread++;
             actread = actread % DATA_SIZE;
             pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
 
             //wnd.sup = pack.seq_num;//--------------------------------------------------------
-            if ((pack.seq_num - wnd.inf) > 0) {
-                while ((pack.seq_num - wnd.inf) > N);
-            } else if ((pack.seq_num - wnd.inf) < 0) {
-                while ((MAX_SEQ_NUM - (pack.seq_num - wnd.inf)) > N);
+            if((pack.seq_num - wnd.inf) > 0){
+                while((pack.seq_num - wnd.inf) > N);
+            }
+            else if((pack.seq_num - wnd.inf) < 0){
+                while((MAX_SEQ_NUM - (pack.seq_num - wnd.inf)) > N);
             }////////////////////////------------------------------------------------------
 
 
@@ -399,27 +593,34 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
             send_packet(sockfd, pack, servaddr);///SCARTA CON PROBABILITA p-------------------
             printf("\ninviato pack: %d\n", pack.seq_num);//todo
 
-            memset((void *) pack.data, 0, DATA_SIZE);
+            memset((void*)pack.data, 0, DATA_SIZE);
         }
-    }
+    }*/
     pack.last = 1;
     pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-    ////CONTROLLO FINESTRA-------------------------------------------------------------
-    if ((pack.seq_num - wnd.inf) > 0) {
-        while ((pack.seq_num - wnd.inf) > N);
-    } else if ((pack.seq_num - wnd.inf) < 0) {
-        while ((MAX_SEQ_NUM - (pack.seq_num - wnd.inf)) > N);
-    }////////////////////////------------------------------------------------------
 
-    wnd.wnd_buff[pack.seq_num % N] = pack;//timer------------------------------------------------
-    wnd.acked[pack.seq_num % N] = 0;
-    wnd.sup = pack.seq_num;//////////PRIMA DI SPEDIRE
-    //printf("\ncontenuto: \n %s \n", pack.data);
-    send_packet(sockfd, pack, servaddr);
-    printf("\ninviato pack: %d\n", pack.seq_num);//todo
+    while(send_args.slots[slot] == 1);
+    send_args.ready[slot] = pack;
+    send_args.slots[slot] = 1;
+    /* ////CONTROLLO FINESTRA-------------------------------------------------------------
+     if((pack.seq_num - wnd.inf) > 0){
+         while((pack.seq_num - wnd.inf) > N);
+     }
+     else if((pack.seq_num - wnd.inf) < 0){
+         while((MAX_SEQ_NUM - (pack.seq_num - wnd.inf)) > N);
+     }////////////////////////------------------------------------------------------
+
+     wnd.wnd_buff[pack.seq_num % N] = pack;//timer------------------------------------------------
+     wnd.acked[pack.seq_num % N] = 0;
+     wnd.sup = pack.seq_num;//////////PRIMA DI SPEDIRE
+     //printf("\ncontenuto: \n %s \n", pack.data);
+     send_packet(sockfd, pack, servaddr);
+     printf("\ninviato pack: %d\n", pack.seq_num);//todo*/
 
     //for(int n=0;n<N;n++){
-    while (wnd.acked[wnd.sup % N] == 0);
+    for(int i=0;i<2;i++){
+        pthread_join(tid[i], NULL);
+    }
     //}
     /* while(semop(sem_stdout, &w_stdo, 1) == -1){
          if(errno != EINTR){
@@ -434,7 +635,6 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     }*/
     exit(0);
 }
-
 void main(int argc, char *argv[]) {
     if (argc > 2) {
         printf("\nUsage: %s <server IP address>\n", argv[0]);
