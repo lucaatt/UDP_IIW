@@ -1,8 +1,9 @@
+#include <time.h>
 #ifndef UDP_IIW_DATA_FORMAT_H
 #define UDP_IIW_DATA_FORMAT_H
 
 #define DATA_SIZE 1484
-#define N 2
+#define N 3
 #define MAX_SEQ_NUM 60000
 #define READY_SIZE 5
 //window size
@@ -35,6 +36,9 @@ typedef struct window{
 typedef struct ack_thread_args{
     struct window *wnd;
     int sockfd;
+    struct sockaddr_in servaddr;
+    timer_t *timers;
+    int timer_num;
 }ack_thread_args;
 
 typedef struct send_thread_args{
@@ -43,6 +47,7 @@ typedef struct send_thread_args{
     short slots[READY_SIZE];
     struct sockaddr_in servaddr;
     int sockfd;
+    timer_t *timers;
 }send_thread_args;
 
 #endif

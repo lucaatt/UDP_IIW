@@ -4,6 +4,8 @@
 #define SERV_PORT 1234
 #define CMD_SIZE 128
 #define MAX_FILENAME_SIZE 128
+#define DEF_TO_SEC 1
+#define DEF_TO_NSEC 0
 
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -19,6 +21,7 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <pthread.h>
+#include <time.h>
 
 
 #endif

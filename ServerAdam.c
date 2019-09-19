@@ -113,7 +113,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
                     wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
                     wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
                     ack_pack.ack_num = pack.seq_num;
-                    //sleep(1);//todo
+                    sleep(5);//todo
                     printf("\ninviato ACK: %d\n", pack.seq_num);//todo
                     send_ctrl_packet(sockfd, ack_pack, addr);
                     if(pack.seq_num == wnd.inf + 1){
