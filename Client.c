@@ -9,36 +9,7 @@ void event_handler() {
     printf("\n");
 }
 
-void retransmission_thread(union sigval arg){
-    //union sigval * ptr = (union sigval *)arg;
-    //printf("\nretx thr starting %d\n", timer_num);
-    struct ack_thread_args *args = (struct ack_thread_args *)arg.sival_ptr;
-    int timer_num = args->timer_num;
-    struct window *wnd= args->wnd;
-    int sockfd = args->sockfd;
-    //int timer_num = arg.sival_int;
-    //printf("\nretx thr starting %d\n", 4);
-    int res;
 
-    struct itimerspec timeout;
-
-    timeout.it_value.tv_sec = DEF_TO_SEC;
-    timeout.it_value.tv_nsec = DEF_TO_NSEC;
-    timeout.it_interval.tv_sec = 0;
-    timeout.it_interval.tv_nsec = 0;
-
-    timer_t timer = args->timers[timer_num];
-
-    send_packet(sockfd, wnd->wnd_buff[timer_num], args->servaddr);///SCARTA CON PROBABILITA p-------------------
-
-    ///////////////////////////////////SET TIMER
-    res = timer_settime(timer, 0, &timeout, NULL);
-    if(res == -1){
-        err_handler("retx thread", "settime");
-    }
-    printf("\nritrasmissione pack: %d\n", wnd->wnd_buff[timer_num].seq_num);//todo
-    pthread_exit(0);
-}
 
 /*
  * Gestisce la ricezione degli ACK e lo spostamento della finestra di spedizione
@@ -192,13 +163,24 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     int n;
     struct sembuf s_stdo, w_stdo;
 
-    wnd.inf = pack.seq_num;
-    wnd.sup = pack.seq_num;
+    //wnd.inf = pack.seq_num;
+    //wnd.sup = pack.seq_num;
+
+    filename = (char *)malloc(MAX_FILENAME_SIZE);
+    if(filename == NULL) {
+        err_handler(who, "malloc");
+    }
+
+    memset((void *) &pack, 0, sizeof(pack));
+
 
     res = handshake_client(sockfd, &ack_pack, &servaddr);
     if (res == -1) {
         err_handler(who, "handshake_client");
     }
+
+    pack.seq_num = 1;
+    pack.ack_num = 0;
 
     w_stdo.sem_num = 0;
     w_stdo.sem_op = -1;
@@ -213,7 +195,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
 
     printf("\nEnter filename to receive: ");
 
-    getfrom_stdin(path, "Enter filename to receive: ", who, "scanf");
+    getfrom_stdin(filename, "Enter filename to receive: ", who, "scanf");
     res = semop(sem_stdout, &s_stdo, 1);
     if (res == -1) {
         err_handler(who, "semop");
@@ -222,14 +204,17 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     if (res < 0) {
         err_handler(who, "sprintf");
     }
+    printf("\nfilename in data %s\n",filename);
+
+    send_packet(sockfd, pack, servaddr);
     ack_pack.ack = 1;
     ack_pack.ack_num = pack.seq_num;
-    printf("ACK: %d\n", ack_pack.ack_num);
-    send_ctrl_packet(sockfd, ack_pack, servaddr);
+    //printf("ACK: %d\n", ack_pack.ack_num);
+    //send_ctrl_packet(sockfd, ack_pack, servaddr);
 
-    printf("Client receive file %s from Server", filename);
-    sprintf(path, "./client_files/%s", filename);
-    while ((fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0660)) == -1) {
+    //printf("Client sta ricevendo il file %s dal Server", filename);
+    //sprintf(path, "./client_files/%s", filename);
+    /*while ((fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0660)) == -1) {
         if (errno != EINTR) {
             err_handler(who, "open");
         }
@@ -237,8 +222,9 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
     file = fdopen(fd, "w+");
     if (file == NULL) {
         err_handler(who, "fdopen");
-    }
+    }*/
     while (1) {
+
         memset((void *) pack.data, 0, sizeof(DATA_SIZE));
         res = recvfrom(sockfd, (void *) &pack, sizeof(pack), 0, (
                 struct sockaddr *) &servaddr, &len);
