@@ -165,6 +165,9 @@ void * ack_thread(void * arg){
     }
 }
 
+/*
+ * IL THREAD PARTE QUANDO IL TIMER[TIMER_NUM] SCADE INDICANDO UN TIMEOUT
+ */
 void retransmission_thread(union sigval arg){
     struct ack_thread_args *args = (struct ack_thread_args *)arg.sival_ptr;
     int timer_num = args->timer_num;

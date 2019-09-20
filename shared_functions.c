@@ -16,10 +16,10 @@ void getfrom_stdin(char *dest, char *mess, char *who, char *what){
     }
 }
 
-/*
- * invia sulla SOCKET sockfd il pacchetto PACK (VEDERE DATA_FORMAT) all'indirizzo specificato sa SERVADDR
- */
 
+/*
+ * usata per inviare un pacchetto (pack -> vedere data_format) dalla SOCKET sockfd all'indirizzo in servaddr
+ */
 void send_packet(int sockfd, struct packet pack, struct sockaddr_in servaddr) {
     int sent = 0;
     int res;
