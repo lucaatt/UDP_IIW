@@ -1,4 +1,5 @@
 #include <time.h>
+#include <pthread.h>
 #ifndef UDP_IIW_DATA_FORMAT_H
 #define UDP_IIW_DATA_FORMAT_H
 
@@ -39,6 +40,7 @@ typedef struct ack_thread_args{
     struct sockaddr_in servaddr;
     timer_t *timers;
     int timer_num;
+    pthread_spinlock_t *locks;
 }ack_thread_args;
 
 typedef struct send_thread_args{
@@ -48,6 +50,7 @@ typedef struct send_thread_args{
     struct sockaddr_in servaddr;
     int sockfd;
     timer_t *timers;
+    pthread_spinlock_t *locks;
 }send_thread_args;
 
 #endif
