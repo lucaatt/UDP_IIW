@@ -27,19 +27,49 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
     ctrl_pack->seq_num = 0;//rand();
     ctrl_pack->syn = 1;
     int len, res;
+    struct timespec connection_timeout = {2,0};
+    int attempts = 0;
 
     send_ctrl_packet(sockfd, *ctrl_pack, *servaddr);
 
     len = sizeof(*servaddr);
 
     /*
+     * IMPOSTA TIMEOUT DI CONNESSIONE
+     *
+     * VIENE INCREMENTATO AD OGNI TENTATIVO (MAX TENTATIVI = 4)
+     */
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+        err_handler("Handshake", "setsockopt");
+    }
+    /*
      * Dopo aver ricevuto correttamente il pacchetto dal SERVER "servaddr" conterrà il
      * nuovo #PORTA che verrà utilizzato dal CLIENT per inviare i mess successivi
     */
-    res = recvfrom(sockfd, (void *) &rcv_pack, sizeof(rcv_pack), 0,
-                   (struct sockaddr *) servaddr, &len);
-    if (res < 0) {
-        return -1;
+    while(recvfrom(sockfd, (void *) &rcv_pack, sizeof(rcv_pack), 0, (struct sockaddr *) servaddr, &len) < 0){
+        if(errno != EINTR){
+            if(errno == EWOULDBLOCK){
+                attempts++;
+                if(attempts == 4){
+                    printf("\n%d attempts to connect with Server. Try again later.\n\n", attempts);
+                    exit(0);
+                }
+                printf("\nHandshake attempt number %d. Server not responding...", attempts);
+                connection_timeout.tv_sec = (connection_timeout.tv_sec)*2;
+                if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+                    err_handler("Handshake", "setsockopt");
+                }
+                send_ctrl_packet(sockfd, *ctrl_pack, *servaddr);
+            }
+            else{
+                err_handler("Handshake", "recvfrom");
+            }
+        }
+    }
+    connection_timeout.tv_sec = 0;
+    connection_timeout.tv_nsec = 0;
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+        err_handler("Handshake", "setsockopt");
     }
     if (rcv_pack.ack == 1) {
         if (rcv_pack.ack_num != ctrl_pack->seq_num) {
@@ -50,13 +80,16 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
     } else {
         return -1;
     }
-    if (ctrl_pack->cmd == 1) {
+    if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2) {
         /*
          * ctrl pack ha #SEQ e #ACK(seq server)
          * servaddr ha nuovo #PORT del server
          * se PUT ultimo ACK handshake in piggyback con FILENAME
          */
         ctrl_pack->syn = 0;
+        if(AUDIT_SEND == 1){
+            printf("\nHANDSHAKE CONCLUSO\n");
+        }
         return 0;
     }
     return 0;
@@ -265,19 +298,12 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     struct sigevent sig_to;
     pthread_spinlock_t locks[N];
 
+    struct itimerspec timeout;
 
-
-    ppid = getppid();
-    memset((void*)&ctrl_pack, 0, sizeof(ctrl_pack));
-    memset((void*)&wnd, 0, sizeof(wnd));
-
-    sprintf(who, "%s", "Client PUT");
-    ctrl_pack.cmd = 1;
-
-    res = handshake_client(sockfd, &ctrl_pack, &servaddr);
-    if(res == -1){
-        err_handler(who, "handshake_client");
-    }
+    timeout.it_value.tv_sec = DEF_TO_SEC;
+    timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    timeout.it_interval.tv_sec = 0;
+    timeout.it_interval.tv_nsec = 0;
 
     w_stdo.sem_num = 0;
     w_stdo.sem_op = -1;
@@ -286,12 +312,22 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     s_stdo.sem_op = 1;
     s_stdo.sem_flg = 0;
 
+    srand(time(0));//NECESSARIO PER GENERARE OGNI VOLTA SEQUENZE DIVERSE DI NUMERI PSEUDORANDOM
+
+
+    ppid = getppid();
+    memset((void*)&ctrl_pack, 0, sizeof(ctrl_pack));
+    memset((void*)&wnd, 0, sizeof(wnd));
     memset((void*)&pack, 0, sizeof(pack));
+
+    sprintf(who, "%s", "Client PUT");
+    ctrl_pack.cmd = 1;
+
+
     filename = (char *)malloc(MAX_FILENAME_SIZE);
     if(filename == NULL) {
         err_handler(who, "malloc");
     }
-
     printf("\nEnter filename to send: ");
 
     getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
@@ -299,13 +335,12 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     if(res == -1){
         err_handler(who, "semop");
     }
-
     /*
- * SPINLOCK DEI TIMER
- * inizializzazione spinlock -> lock prima di spedire pacchetto reativo al TIMER
- *                              unlock dopo START(send_thread o retrans_thread) e STOP(ack_thread) TIMER
- *                                                wnd_acked = 0                       wnd_acked = 1
- */
+* SPINLOCK DEI TIMER
+* inizializzazione spinlock -> lock prima di spedire pacchetto reativo al TIMER
+*                              unlock dopo START(send_thread o retrans_thread) e STOP(ack_thread) TIMER
+*                                                wnd_acked = 0                       wnd_acked = 1
+*/
 
     for(int i=0; i<N; i++){
         res = pthread_spin_init(&locks[i], PTHREAD_PROCESS_PRIVATE);
@@ -319,12 +354,7 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     if(res < 0){
         err_handler(who, "sprintf");
     }
-    pack.seq_num = ctrl_pack.seq_num + 1;
-    pack.ack_num = ctrl_pack.ack_num;
-    pack.ack = 1;
 
-    wnd.inf = pack.seq_num - 1;
-    wnd.sup = pack.seq_num;
     for(n=0;n<N;n++){
         wnd.acked[n] = 0;
     }
@@ -346,13 +376,64 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         args[i].servaddr = servaddr;
         timer_create(CLOCK_MONOTONIC, &sig_to, &timers[i]);
     }
+
+    res = handshake_client(sockfd, &ctrl_pack, &servaddr);
+    if(res == -1){
+        err_handler(who, "handshake_client");
+    }
+
+/*
+    memset((void*)&pack, 0, sizeof(pack));
+    filename = (char *)malloc(MAX_FILENAME_SIZE);
+    if(filename == NULL) {
+        err_handler(who, "malloc");
+    }
+
+    printf("\nEnter filename to send: ");
+
+    getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
+    res = semop(sem_stdout, &s_stdo, 1);
+    if(res == -1){
+        err_handler(who, "semop");
+    }
+
+    for(int i=0; i<N; i++){
+        res = pthread_spin_init(&locks[i], PTHREAD_PROCESS_PRIVATE);
+        if(res != 0){
+            err_handler(who, "spinlock init");
+        }
+    }
+
+
+    res = sprintf(pack.data, "%s", filename);
+    if(res < 0){
+        err_handler(who, "sprintf");
+    }
+  */
+    pack.seq_num = ctrl_pack.seq_num + 1;
+    pack.ack_num = ctrl_pack.ack_num;
+    pack.ack = 1;
+
+    wnd.inf = pack.seq_num - 1;
+    wnd.sup = pack.seq_num;
+
+    for(int i=0;i<N;i++){
+        args[i].servaddr = servaddr;
+    }
+
     res = pthread_create(&tid[0], NULL, ack_thread, (void*)&args[0]);
     if(res == -1){
         err_handler(who, "pthread_create");
     }
 
     wnd.wnd_buff[pack.seq_num % N] = pack;
+    wnd.acked[pack.seq_num % N] = 0;
     send_packet(sockfd, pack, servaddr);
+
+    res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+    if(res == -1){
+        err_handler("send thread", "settime");
+    }
 
     while((wnd.sup - wnd.inf) != 0);
 
@@ -398,11 +479,6 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
             slot = (slot + 1)%READY_SIZE;
 
             memset((void*)pack.data, 0, DATA_SIZE);
-
-
-
-            //sleep(13);
-            //printf("\nUSCITO DA PAUSE\n");//todo
         }
     }
     pack.last = 1;
@@ -446,6 +522,8 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     struct sembuf s_stdo, w_stdo;
     pid_t ppid;
 
+    srand(time(0));//NECESSARIO PER GENERARE OGNI VOLTA SEQUENZE DIVERSE DI NUMERI PSEUDORANDOM
+
     memset((void*)&ack_pack, 0, sizeof(ack_pack));
     memset((void*)&pack, 0, sizeof(pack));
     memset((void*)&wnd, 0, sizeof(wnd));
@@ -455,18 +533,6 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     }
 
     sprintf(who, "%s", "Client GET");
-    ack_pack.cmd = 2;/////////LETTO DA SERVER (VALORE 2 INDICA GET)
-    /////CMD USATO IN HANDSHAKE!!!
-    /*
-     * Dopo HANDSHAKE ack_pack.seq_num = 0 (#SEQ CLIENT)
-     *                 ack_pack.ack_num = 0 (#SEQ SERVER)  ==>  non necessariamente uguali
-     *                                                          (#SEQ SERVER aumenterà con ricezione FILE)
-     *                                                           (#SEQ CLIENT aumenterà solo per mandare FILENAME)
-     */
-    res = handshake_client(sockfd, &ack_pack, &servaddr);
-    if(res == -1){
-        err_handler(who, "handshake_client");
-    }
 
     s_stdo.sem_num = 0;
     s_stdo.sem_op = 1;
@@ -485,6 +551,36 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         err_handler(who, "semop");
     }
 
+    ack_pack.cmd = 2;/////////LETTO DA SERVER (VALORE 2 INDICA GET)
+    /////CMD USATO IN HANDSHAKE!!!
+    /*
+     * Dopo HANDSHAKE ack_pack.seq_num = 0 (#SEQ CLIENT)
+     *                 ack_pack.ack_num = 0 (#SEQ SERVER)  ==>  non necessariamente uguali
+     *                                                          (#SEQ SERVER aumenterà con ricezione FILE)
+     *                                                           (#SEQ CLIENT aumenterà solo per mandare FILENAME)
+     */
+    res = handshake_client(sockfd, &ack_pack, &servaddr);
+    if(res == -1){
+        err_handler(who, "handshake_client");
+    }
+/*
+    s_stdo.sem_num = 0;
+    s_stdo.sem_op = 1;
+    s_stdo.sem_flg = 0;
+
+    filename = (char *)malloc(MAX_FILENAME_SIZE);
+    if(filename == NULL) {
+        err_handler(who, "malloc");
+    }
+
+    printf("\nEnter filename to get: ");
+
+    getfrom_stdin(filename, "Enter filename to get: ", who, "scanf");
+    res = semop(sem_stdout, &s_stdo, 1);
+    if(res == -1){
+        err_handler(who, "semop");
+    }
+*/
     res = sprintf(pack.data, "%s", filename);///ULTIMO PACCHETTO HANDSHAKE CHE OLTRE ACK CONTIENE FILENAME
     if(res < 0){
         err_handler(who, "sprintf");
@@ -496,16 +592,49 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     send_packet(sockfd, pack, servaddr);////////GESTIRE PERDITA
 
 
+
     /*
-     * ACK DAL SERVER E CONFERMA ESISTENZA FILE
-     *
-     */
+ * ACK DAL SERVER E CONFERMA ESISTENZA FILE
+ *
+ */
+    struct timespec connection_timeout = {DEF_TO_SEC,0};
+    int attempts = 0;
     len = sizeof(servaddr);
-    res = recvfrom(sockfd, (void *)&pack, sizeof(pack), 0,
-                   (struct sockaddr *)&servaddr, &len);
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+        err_handler("Get function", "setsockopt");
+    }
+    while(recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, (struct sockaddr *)&servaddr, &len) < 0){
+        if(errno != EINTR){
+            if(errno == EWOULDBLOCK){
+                attempts++;
+                if(attempts == 4){
+                    printf("\nServer not responding. Closing connection...\n\n");
+                    exit(0);
+                }
+                connection_timeout.tv_sec = (connection_timeout.tv_sec)*2;
+                if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+                    err_handler("Handshake", "setsockopt");
+                }
+                send_packet(sockfd, pack, servaddr);
+            }
+            else{
+                err_handler("Handshake", "recvfrom");
+            }
+        }
+    }
+    connection_timeout.tv_sec = 0;
+    connection_timeout.tv_nsec = 0;
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+        err_handler("Handshake", "setsockopt");
+    }
+
+      /*
+    len = sizeof(servaddr);
+    res = recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, (struct sockaddr *)&servaddr, &len);
     if (res < 0) {
         exit(-1);
     }
+       */
     if (pack.ack == 1) {
         if (pack.ack_num != ack_pack.seq_num + 1) {
             printf("\nwrong ACK number from SERVER\n");
@@ -567,7 +696,9 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
          memset((void*)pack.data, 0, sizeof(DATA_SIZE));
          res = recvfrom(sockfd, (void*)&pack, sizeof(pack), 0,
                         (struct sockaddr *)&servaddr, &len);
-         printf("\nricevuto pack: %d\n", pack.seq_num);//todo
+         if(AUDIT == 1) {
+             printf("\nricevuto pack: %d\n", pack.seq_num);
+         }
          if(res < 0){
              err_handler(who, "recvfrom");
          }
@@ -579,13 +710,14 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                  wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
                  wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
                  ack_pack.ack_num = pack.seq_num;
-                 sleep(3);//todo
-                 printf("\ninviato ACK: %d\n", pack.seq_num);//todo
+                 sleep(1);//todo
                  send_ctrl_packet(sockfd, ack_pack, servaddr);
                  if(pack.seq_num == wnd.inf + 1){
                      while((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)){
                          res = fprintf(file, "%s", wnd.wnd_buff[(wnd.inf+1)%N].data);
-                         printf("\nscritto: %d\n", wnd.inf+1);//todo
+                         if(AUDIT == 1) {
+                             printf("\nscritto: %d\n", wnd.inf + 1);
+                         }
                          if(res < 0){
                              err_handler(who, "fprintf");
                          }
@@ -596,7 +728,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                              ack_pack.ack = 0;
                              ack_pack.fin = 1;
                              send_ctrl_packet(sockfd, ack_pack, servaddr);//ASPETTA CONFERMA CHIUSURA
-                             exit(0);
+                             //exit(0);
                              /*
                               * EXIT VA TOLTO PER PERMETTERE DI INVIARE GLI ACK PERSI
                               * ANCHE SE FILE SALVATO CORRETTAMENTE

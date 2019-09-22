@@ -5,7 +5,13 @@
 #define CMD_SIZE 128
 #define MAX_FILENAME_SIZE 128
 #define DEF_TO_SEC 1
+//default timeout seconds
 #define DEF_TO_NSEC 0
+
+#define AUDIT_SEND 1
+#define AUDIT_WND 1
+#define AUDIT_ACK 1
+#define AUDIT 1
 
 #include <sys/types.h>
 #include <sys/socket.h>

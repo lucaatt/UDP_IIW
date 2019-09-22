@@ -15,6 +15,12 @@ int handshake_server(int sockfd, struct ctrl_packet *ctrl_pack, struct packet *p
 
     len = sizeof(*addr);
     if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2) {
+        /*
+         * METTERE TEMPO MASSIMO DI ATTESA
+         *
+         * IN OGNI CASO DOPO RECVFROM -> FILENAME RICEVUTO
+         * SE ACK NON ARRIVA AL CLIENT VERRA RISPEDITO SENZA LEGGERE ANCORA FILENAME
+         */
         res = recvfrom(sockfd, (void *) pack, sizeof(*pack), 0,
                        (struct sockaddr *) addr, &len);
         if (res < 0) {
@@ -45,6 +51,7 @@ void put_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
     struct window wnd;
     int var;
     int n;
+
 
     for (n = 0; n < N; n++) {
         wnd.acked[n] = 0;
@@ -88,7 +95,7 @@ void put_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
                 wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
                 wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
                 ack_pack.ack_num = pack.seq_num;
-                sleep(5);//todo
+                sleep(1);//todo
                 printf("\ninviato ACK: %d\n", pack.seq_num);//todo
                 send_ctrl_packet(sockfd, ack_pack, addr);
                 if (pack.seq_num == wnd.inf + 1) {
@@ -176,7 +183,7 @@ void put_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
  * GESTISCE RICHIESTA GET
  *
  * PACK ->  PACK.SEQ_NUM = #SEQ CLIENT( = 1)
- *          PACK.ACK_NUM = #SEQ SERVER( = 0) DA INCREMENTARE NEL PROSSIMO POACCHETTO
+ *          PACK.ACK_NUM = #SEQ SERVER( = 0) DA INCREMENTARE NEL PROSSIMO PACCHETTO
  * ADDR ->  #PORTA E IP DEL CLIENT CHE HA INVIATO LA RICHIESTA
  */
 void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr){
@@ -188,6 +195,7 @@ void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
     int n;
     unsigned int temp;
     pthread_t tid[2];
+
 
     struct send_thread_args send_args;
     struct ack_thread_args args[N];
@@ -225,6 +233,7 @@ void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
             pack.ack = 0;
             pack.seq_num = pack.seq_num + 1;
             send_packet(sockfd, pack, addr);//todo gestire perdita
+            //mettere timer e ack_thread
             printf("\nrequested file does not exist\n");
             exit(0);
         }
@@ -308,11 +317,6 @@ void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
             slot = (slot + 1)%READY_SIZE;
 
             memset((void*)pack.data, 0, DATA_SIZE);
-
-
-
-            //sleep(3);
-            //printf("\nUSCITO DA PAUSE\n");//todo
         }
     }
     pack.last = 1;
@@ -330,7 +334,6 @@ void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
     exit(0);
 
 }
-//PROVA
 
 /*
 void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in addr) {
@@ -749,6 +752,7 @@ void request_handler(int sockfd, struct packet pack, int cmd, struct sockaddr_in
 }
 */
 
+//TODO AGGIUNGERE SIGCHILD IGNORE
 int main(int argc, char *argv[]) {
     int listen_sockfd, connection_sockfd;
     int res, len, cmd;
@@ -807,19 +811,24 @@ int main(int argc, char *argv[]) {
          *                            pack.ack_num = #SEQ SERVER (ack ricevuto)
          *                         pack.data = filename (se GET o PUT)
          */
-        res = handshake_server(connection_sockfd, &ctrl_pack, &pack, &addr);
-        if (res == -1) {
-            err_handler(who, "handshake_server");
-        }
         pid = fork();
         if (pid == -1) {
             err_handler(who, "fork");
         }
         if (pid == 0) {
+            srand(time(0));//NECESSARIO PER GENERARE OGNI VOLTA SEQUENZE DIVERSE DI NUMERI PSEUDORANDOM
             if (cmd == 1) {
+                res = handshake_server(connection_sockfd, &ctrl_pack, &pack, &addr);
+                if (res == -1) {
+                    err_handler(who, "handshake_server");
+                }
                 put_request_handler(connection_sockfd, pack, addr);
             }
             else if (cmd == 2) {
+                res = handshake_server(connection_sockfd, &ctrl_pack, &pack, &addr);
+                if (res == -1) {
+                    err_handler(who, "handshake_server");
+                }
                 get_request_handler(connection_sockfd, pack, addr);
             }
             else{

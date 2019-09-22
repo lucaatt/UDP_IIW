@@ -4,7 +4,7 @@
 
 /*
  * THREAD INVIA PACCHETTI LETTI E RESI DISPONIBILI DAL MAIN IN ARGS->READY[] (INIZIA A RIEMPIRE DA  POSIZIONE [0])
- * PRIMA DI INVIARE CONTROLLA CHE #SEQ ENTRO FINESTRA
+ * PRIMA DI INVIARE CONTROLLA CHE #SEQ ENTRO LIMITI FINESTRA
  * QUANDO INVIA ATTIVA TIMER PER TIMEOUT E LIBERA SLOT BUFFER PER INSERIMENTO NUOVO PACCHETTO (SLOT[posizine])
  *
  * CONDIVISI DA ACK/RETRANSMISSION_THREAD
@@ -67,16 +67,16 @@ void * send_thread(void * arg){
         if(res == -1){
             err_handler("send thread", "settime");
         }
-        printf("\ninviato pack: %d\n", args->ready[slot].seq_num);//todo
         res = pthread_spin_unlock(&locks[args->ready[slot].seq_num % N]);
         if(res != 0){
             err_handler("send thread", "spin_unlock");
         }
 
-
         args->slots[slot] = 0;
         if(args->ready[slot].last == 1) {
-            printf("\nsend_thread exit\n");
+            if(AUDIT == 1) {
+                printf("\nsend_thread exit\n");
+            }
             pthread_exit(0);
         }
         slot = (slot + 1) % READY_SIZE;
@@ -124,7 +124,9 @@ void * ack_thread(void * arg){
                     }
                     timer_settime(args->timers[ack_pack.ack_num % N], 0, &stop_to, NULL);
                     wnd->acked[ack_pack.ack_num % N] = 1;
-                    printf("\nACK: %d\n", ack_pack.ack_num);//todo
+                    if(AUDIT_ACK == 1) {
+                        printf("\nACK ricevuto: %d\n", ack_pack.ack_num);
+                    }
                     res = pthread_spin_unlock(&locks[ack_pack.ack_num % N]);
                     if(res != 0){
                         err_handler("send thread", "spin_unlock");
@@ -132,7 +134,9 @@ void * ack_thread(void * arg){
                     if (ack_pack.ack_num == wnd->inf + 1) {
                         while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
                             wnd->inf = (wnd->inf + 1) % MAX_SEQ_NUM;
-                            printf("\nClient finestra [%d, %d]\n", wnd->inf, wnd->sup);//****************
+                            if(AUDIT_WND == 1) {
+                                printf("\nFinestra spediti [%d, %d]\n", wnd->inf, wnd->sup);
+                            }
                         }
                     }
                 }
@@ -158,7 +162,9 @@ void * ack_thread(void * arg){
         } else {
             //CONFERMA RICEZIONE SERVER
             if(ack_pack.fin == 1) {
-                printf("\nTHREAD ESCE\n");
+                if(AUDIT == 1) {
+                    printf("\nACK THREAD ESCE\n");
+                }
                 pthread_exit(0);
             }
         }
@@ -200,7 +206,9 @@ void retransmission_thread(union sigval arg){
         if(res == -1){
             err_handler("retx thread", "settime");
         }
-        printf("\nritrasmissione pack: %d\n", wnd->wnd_buff[timer_num].seq_num);//todo
+        if(AUDIT_SEND == 1) {
+            printf("\nritrasmissione pack: %d\n", wnd->wnd_buff[timer_num].seq_num);
+        }
     }
     //spinunlock
     res = pthread_spin_unlock(&locks[timer_num]);
