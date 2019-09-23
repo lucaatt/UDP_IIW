@@ -3,6 +3,7 @@
 #define P 30
 //probabilità di perdita pacchetto(scartato da send_packet) in percentuale
 
+
 void err_handler(char *who, char *what){
     printf("\n%s %s error\n", who, what);
     perror(what);

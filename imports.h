@@ -8,6 +8,10 @@
 //default timeout seconds
 #define DEF_TO_NSEC 0
 
+//adaptive timeout
+long SAMPLE_RTT_SEC;
+long SAMPLE_RTT_NSEC;
+
 #define AUDIT_SEND 1
 #define AUDIT_WND 1
 #define AUDIT_ACK 1
@@ -29,5 +33,6 @@
 #include <pthread.h>
 #include <time.h>
 
+#define ADAPTIVE 1
 
 #endif

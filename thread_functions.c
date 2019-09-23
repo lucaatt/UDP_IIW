@@ -35,8 +35,26 @@ void * send_thread(void * arg){
     struct itimerspec timeout;
     pthread_spinlock_t *locks = args->locks;
 
-    timeout.it_value.tv_sec = DEF_TO_SEC;
-    timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    if(ADAPTIVE == 1){
+        if(SAMPLE_RTT_SEC == 0 && SAMPLE_RTT_NSEC == 0){
+
+            timeout.it_value.tv_sec = DEF_TO_SEC;
+            timeout.it_value.tv_nsec = DEF_TO_NSEC;
+        }else{
+            timeout.it_value.tv_sec = SAMPLE_RTT_SEC;
+            timeout.it_value.tv_nsec = SAMPLE_RTT_NSEC;
+        }
+
+        printf("\n\ntimeout.it_value.tv_sec  %ld\n\n",timeout.it_value.tv_sec);
+        printf("\n\ntimeout.it_value.tv_nsec  %ld\n\n",timeout.it_value.tv_nsec);
+        printf("\n\nSAMPLE_RTT_SEC  %ld\n\n",SAMPLE_RTT_SEC);
+        printf("\n\nSAMPLE_RTT_NSEC  %ld\n\n",SAMPLE_RTT_NSEC);
+
+    }else
+    {
+        timeout.it_value.tv_sec = DEF_TO_SEC;
+        timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    }
     timeout.it_interval.tv_sec = 0;
     timeout.it_interval.tv_nsec = 0;
 
@@ -85,6 +103,13 @@ void * send_thread(void * arg){
 /*
  * Gestisce la ricezione degli ACK e lo spostamento della finestra di spedizione
  */
+
+void * close_connection(void *arg){
+
+
+}
+
+
 void * ack_thread(void * arg){
     struct ack_thread_args *args = (struct ack_thread_args *)arg;
     struct window *wnd;
@@ -96,8 +121,25 @@ void * ack_thread(void * arg){
 
     struct itimerspec stop_to;
 
-    stop_to.it_value.tv_sec = 0;
-    stop_to.it_value.tv_nsec = 0;
+    if(ADAPTIVE == 1){
+        if(SAMPLE_RTT_SEC == 0 && SAMPLE_RTT_NSEC == 0){
+
+            stop_to.it_value.tv_sec = 0;
+            stop_to.it_value.tv_nsec = 0;
+        }else{
+            stop_to.it_value.tv_sec = SAMPLE_RTT_SEC;
+            stop_to.it_value.tv_nsec = SAMPLE_RTT_NSEC;
+        }
+    } else{
+
+        stop_to.it_value.tv_sec = 0;
+        stop_to.it_value.tv_nsec = 0;
+
+    }
+
+    //stop_to.it_value.tv_sec = 0;
+    //stop_to.it_value.tv_nsec = 0;
+
     stop_to.it_interval.tv_sec = 0;
     stop_to.it_interval.tv_nsec = 0;
 
@@ -185,8 +227,22 @@ void retransmission_thread(union sigval arg){
     struct itimerspec timeout;
     struct itimerspec timer_state;
 
-    timeout.it_value.tv_sec = DEF_TO_SEC;
-    timeout.it_value.tv_nsec = DEF_TO_NSEC;
+
+    if(ADAPTIVE == 1){
+        if(SAMPLE_RTT_SEC == 0 && SAMPLE_RTT_NSEC == 0){
+
+            timeout.it_value.tv_sec = SAMPLE_RTT_SEC;
+            timeout.it_value.tv_nsec = SAMPLE_RTT_NSEC;
+        }else{
+            timeout.it_value.tv_sec = DEF_TO_SEC;
+            timeout.it_value.tv_nsec = DEF_TO_NSEC;
+        }
+    }else
+    {
+        timeout.it_value.tv_sec = DEF_TO_SEC;
+        timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    }
+
     timeout.it_interval.tv_sec = 0;
     timeout.it_interval.tv_nsec = 0;
 

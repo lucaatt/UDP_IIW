@@ -6,6 +6,7 @@
 #define IP_LOOPBACK "127.0.0.1"
 #define IP_SIZE 16
 
+
 void event_handler() {
     printf("\n");
 }
@@ -516,6 +517,9 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     struct window wnd;
     int var;
     int n;
+    struct timespec start_time = {0,0};
+    struct timespec end_time = {0, 0};
+    struct timespec sample_RTT = {0, 0};
 
     char buff[1024];
     struct packet pack;//pacchetto per riceve FILE dal SERVER (e inviare filename)
@@ -589,11 +593,18 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     pack.ack_num = ack_pack.ack_num;// #ACK relativo a #SEQ pacchetto SERVER in attesa dell' ACK
     pack.ack = 1;                 ///indica che pacchetto contiene ACK
 
+    if(ADAPTIVE == 1){
+
+
+        if(clock_gettime(CLOCK_MONOTONIC_RAW,&start_time) == -1)
+            err_handler("get function","clock gettime");
+        //prendo il tempo iniziale all'invio del pack
+    }
+
     send_packet(sockfd, pack, servaddr);////////GESTIRE PERDITA
 
 
-
-    /*
+ /*
  * ACK DAL SERVER E CONFERMA ESISTENZA FILE
  *
  */
@@ -601,8 +612,9 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     int attempts = 0;
     len = sizeof(servaddr);
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
-        err_handler("Get function", "setsockopt");
+        err_handler(who, "setsockopt");
     }
+
     while(recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, (struct sockaddr *)&servaddr, &len) < 0){
         if(errno != EINTR){
             if(errno == EWOULDBLOCK){
@@ -622,8 +634,62 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
             }
         }
     }
-    connection_timeout.tv_sec = 0;
-    connection_timeout.tv_nsec = 0;
+    if(clock_gettime(CLOCK_MONOTONIC_RAW,&end_time) == -1)
+        err_handler(who,"clock gettime");
+
+    if(ADAPTIVE == 1){
+
+
+        //prendo il tempo finale alla ricezione dell'ack
+
+        double sec = difftime(end_time.tv_sec,start_time.tv_sec);
+        //long old_estimated = estimated;
+        long nsec = end_time.tv_nsec - start_time.tv_nsec;
+        long secn = sec*(1.0e9);
+
+        long time_tot = secn + nsec;
+
+
+        if(time_tot >(3*(1.0e6)) || time_tot<(1*(1.0e6))){
+            SAMPLE_RTT_SEC = DEF_TO_SEC;
+            SAMPLE_RTT_NSEC = DEF_TO_NSEC;
+        }else{
+            SAMPLE_RTT_SEC = time_tot/(1.0e9);
+            if(SAMPLE_RTT_SEC > 0){
+                SAMPLE_RTT_NSEC = time_tot - (SAMPLE_RTT_SEC*(1.0e9));
+            }
+            else{
+                SAMPLE_RTT_NSEC = time_tot;
+            }
+        }
+
+/*
+        double alpha = 0.125;
+        double beta = 0.250;
+
+        estimated = ((1-alpha)*(old_estimated)) + ((alpha)*(time_tot));
+        deviance = ((1-beta)*(deviance)) + (beta*(labs(time_tot - estimated)));
+        time_tot = estimated + (4*deviance);
+
+*/
+        ///sample_RTT.tv_sec = sec;
+        ////sample_RTT.tv_nsec = nsec;
+
+        //connection_timeout = sample_RTT;
+        connection_timeout.tv_sec = SAMPLE_RTT_SEC;
+        connection_timeout.tv_nsec = SAMPLE_RTT_NSEC;
+        printf("\n SAMPLE_RTT_SEC  %ld\n\n",SAMPLE_RTT_SEC);
+        printf("\n SAMPLE_RTT_NSEC  %ld\n\n",SAMPLE_RTT_NSEC);
+
+
+
+    }else{
+
+        connection_timeout.tv_sec = 0;
+        connection_timeout.tv_nsec = 0;
+    }
+
+
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
         err_handler("Handshake", "setsockopt");
     }
@@ -745,7 +811,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                  send_ctrl_packet(sockfd, ack_pack, servaddr);
              }
          }
-         else if(((wnd.inf + N) % MAX_SEQ_NUM) < wnd.inf){
+         else if(((wnd.inf + N) % MAX_SEQ_NUM) < wnd.inf){ //todo per limite del file;
              if(pack.seq_num < ((wnd.inf + N)%MAX_SEQ_NUM)){
                  if(wnd.sup >= wnd.inf) {
                      wnd.sup = pack.seq_num;
