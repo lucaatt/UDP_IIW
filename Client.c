@@ -460,6 +460,7 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         err_handler(who, "pthread_create");
     }
     int slot = 0;
+    /////////////////////////////////////////////////////////////////////vedi qui
     while((res = read(fd, (void*)&(pack.data[actread]), 1)) != 0){
         if(res == -1){
             if(errno != EINTR){
@@ -878,6 +879,77 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
  * servaddr utilizzato successivamente nella funzione "send_packet" per mandare pacchetti al server
  * ( contiene #PORTA E IP del SERVER )
  */
+
+void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
+    char who[20];
+    char buff[1024];
+    int len, res, n;
+    struct packet pack;
+    struct sembuf s_stdo, w_stdo;
+    struct ctrl_packet ctrl_pack;
+    struct window wnd;
+    pid_t ppid;
+
+    memset((void*)&ctrl_pack, 0, sizeof(ctrl_pack));
+    memset((void*)&pack, 0, sizeof(pack));
+    memset((void*)&wnd, 0 , sizeof(wnd));
+
+    for (n=0; n<N; n++){
+        wnd.acked[n]=0;
+    }
+
+    sprintf(who, "%s","client LIST");
+    ctrl_pack.cmd = 3;
+
+    res = handshake_client(sockfd, &ctrl_pack, &servaddr);
+    if (res == -1){
+        err_handler(who, "handshake_client");
+    }
+    printf("\nRequest forwarded");
+    res = sprintf(pack.data, "%s", 0);// ultimo ack handshake
+    if(res <0){
+        err_handler(who, "sprintf");
+    }
+
+    pack.seq_num = ctrl_pack.seq_num +1;
+    pack.ack_num = ctrl_pack.ack_num;
+    pack.ack = 1;
+
+    send_packet(sockfd, pack, servaddr); //gestione dell'arrivo dell'ordine corretto dei pack
+
+    len = sizeof(servaddr);
+    res = recvfrom(sockfd, (void *)&pack, sizeof(pack), 0,
+                   (struct sockaddr *)&servaddr, &len);
+
+    if (pack.ack == 1) {
+        if (pack.ack_num != ctrl_pack.seq_num + 1) {
+            printf("\nwrong ACK number from SERVER\n");
+            kill(ppid, SIGUSR1);
+            exit(-1);
+        }
+        if(pack.seq_num != ctrl_pack.ack_num + 1){
+            printf("\nwrong SEQ number from SERVER\n");
+            kill(ppid, SIGUSR1);
+            exit(-1);
+        }
+    }else if(pack.ack == 0){// caso nessun file presente
+        printf("\nMessage from SERVER: it is not possible to make a list because there is no file\n");
+        kill(ppid, SIGUSR1);
+        exit(0);
+    }
+    ctrl_pack.ack_num = pack.seq_num;
+    ctrl_pack.ack = 1;
+    printf("\ninviato ACK: %d\n", pack.seq_num);//todo
+    send_ctrl_packet(sockfd, ctrl_pack, servaddr);
+
+   // for (int i=9; i=0; i--){//stampa il contenuto della lista a schermo
+        //if(){//controlla gli elementi parziali del pacchetto finale
+           // printf("%s\n",pack[i]->data);
+       // }
+  //  }
+
+}/////////////////////////////////////
+
 void main(int argc, char *argv[]) {
     if (argc > 2) {
         printf("\nUsage: %s <server IP address>\n", argv[0]);
@@ -949,7 +1021,6 @@ void main(int argc, char *argv[]) {
             if (sockfd == -1) {
                 err_handler(who, "socket");
             }
-
             pid = fork();
             if (pid == -1) {
                 err_handler(who, "fork");
@@ -967,7 +1038,18 @@ void main(int argc, char *argv[]) {
             } else if (pid == 0){
                 get_function(sockfd,sem_stdout, servaddr);
             }
-        } else if (strcmp("exit", cmd) == 0) {
+        }else if (strcmp("list", cmd) == 0 ){
+            sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+            if(sockfd == -1){
+                err_handler(who, "socket");
+            }
+            pid = fork();
+            if (pid == -1) {
+                err_handler(who, "fork");
+            } else if (pid == 0) {
+                list_function(sockfd, sem_stdout, servaddr);
+            }
+        }else if (strcmp("exit", cmd) == 0) {
             printf("\nClosing...\n");
             res = semop(sem_stdout, &s_stdo, 1);
             if(res == -1){

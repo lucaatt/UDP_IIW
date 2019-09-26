@@ -32,7 +32,7 @@ long SAMPLE_RTT_NSEC;
 #include <signal.h>
 #include <pthread.h>
 #include <time.h>
-
+#include <dirent.h>
 #define ADAPTIVE 1
 
 #endif
