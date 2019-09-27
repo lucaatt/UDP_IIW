@@ -2,7 +2,7 @@
 #define UDP_IIW_VARIABLES_H
 
 #define SERV_PORT 1234
-#define ADAPTIVE 1
+#define ADAPTIVE 0
 //1 se TIMEOUT ADATTATIVO 0 altrimenti
 #define BETA 0.25f
 #define ALPHA 0.125f
@@ -20,12 +20,14 @@
 
 #define CALC_TIMEOUT_THREAD 1
 
-#define AUDIT_SEND 0
+#define TEST 1
+
+#define AUDIT_SEND 1
 #define AUDIT_THR 0
 #define AUDIT_WND 0
 #define AUDIT_ACK 0
 #define AUDIT_TO 0
-#define AUDIT 1
+#define AUDIT 0
 
 #include <sys/types.h>
 #include <sys/socket.h>

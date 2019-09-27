@@ -10,11 +10,11 @@ int handshake_server(int sockfd, struct ctrl_packet *ctrl_pack, struct packet *p
     snd_pack.ack_num = ctrl_pack->seq_num;
     snd_pack.ack = 1;
     int len, res;
-
+    //sleep(1);
     send_ctrl_packet(sockfd, snd_pack, *addr);
 
     len = sizeof(*addr);
-    if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2) {
+    if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2 || ctrl_pack->cmd == 3) {
         /*
          * METTERE TEMPO MASSIMO DI ATTESA
          *
@@ -99,7 +99,7 @@ void put_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
         err_handler("Put handler", "setsockopt");
     }
     while (1) {
-        while(recvfrom(sockfd, (void *) &pack, sizeof(pack), 0,(struct sockaddr *) &addr, &len) < 0) {
+        while(recvfrom(sockfd, (void *) &pack, sizeof(pack), 0,NULL,NULL) < 0) {//(struct sockaddr *) &addr, &len) < 0) {
             if(errno != EINTR){
                 if(errno == EWOULDBLOCK){
                     printf("\nClient stopped sending for too long. Closing connection\n");
@@ -572,9 +572,235 @@ void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
 }
 
 void list_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr){
+    char *arr_nomi[NUM_FILENAME_IN_PACK];
+    struct dirent **namelist;
+    //Usati per attesa Main Thread scorrimento finestra
+    pthread_cond_t inf_cv;
+    pthread_mutex_t inf_mux;
+    pthread_cond_init(&inf_cv, NULL);
+    pthread_mutex_init(&inf_mux, NULL);
+    /*
+     * Gestione Finestra di spedizione e ritrasmissione
+     */
+    struct window wnd;
+    //Retransmission thread
+    struct rtx_thread_args rtx_args[N];
+    struct sigevent sig_to;
+    //ACK thread
+    struct ack_thread_args args;
+    //condivise
+    pthread_mutex_t locks[N];
+    //TIMEOUT
+    timer_t timers[N];
+    struct itimerspec timeout;
+    struct timespec send_t;
+    pthread_mutex_t to_mux[2];
+    pthread_rwlock_t to_rwlock;
+    int to_snum;
+    struct timespec sample_rtt;
+    timeout.it_value.tv_sec = DEF_TO_SEC;
+    timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    timeout.it_interval.tv_sec = 0;
+    timeout.it_interval.tv_nsec = 0;
+    /*
+     * Altro
+    */
+    char who[40];
+    int n, j, res;
+    j=0;
+    unsigned int temp;
+    pthread_t tid;
 
+    sprintf(who, "%s", "List handler");
+
+    for ( int m = 0; m < NUM_FILENAME_IN_PACK; m++) {
+        arr_nomi[m] = (char *) malloc(MAX_FILENAME_SIZE);
+    }
+
+    memset((void*)&wnd, 0, sizeof(wnd));
+    /*
+    * Inizializzazione numero sequenza dopo Handshake
+    */
+    temp = pack.seq_num;
+    pack.seq_num = pack.ack_num;
+    pack.ack_num = temp;
+    wnd.inf = pack.seq_num;// INF -> ULTIMO #SEQ CON ACK RICEVUTO IN ORDINE
+    wnd.sup = pack.seq_num + 1;// SUP -> ULTIMO #SEQ SERVER SPEDITO TODO
+    for(n=0;n<N;n++){
+        wnd.acked[n] = 0;
+    }
+    /*
+    * MUTEX DEI TIMER
+    * inizializzazione mutex -> lock prima di spedire pacchetto reativo al TIMER
+    *                              unlock dopo START(send_thread o retrans_thread) e STOP(ack_thread) TIMER
+    *                                                wnd_acked = 0                       wnd_acked = 1
+    */
+    for(int i=0; i<N; i++){
+        res = pthread_mutex_init(&locks[i], NULL);
+        if(res != 0){
+            err_handler(who, "spinlock init");
+        }
+    }
+    /*
+     * TIMEOUT E RITRASMISSIONE
+     */
+    sig_to.sigev_notify = SIGEV_THREAD;
+    sig_to.sigev_notify_function = &retransmission_thread;
+    //Argomenti ack_thread
+    args.sockfd = sockfd;
+    args.wnd = &wnd;
+    args.timers = timers;
+    args.locks = locks;
+    args.servaddr = &addr;
+    args.send_time = &send_t;
+    args.timeout = &timeout;
+    args.to_mutexes = to_mux;
+    args.to_seq_num = &to_snum;
+    args.inf_cv = &inf_cv;
+    args.inf_mux = &inf_mux;
+    args.to_rwlock = &to_rwlock;
+    //Argomenti retransmission_thread
+    for(int i=0;i<N;i++){
+        sig_to.sigev_value.sival_ptr = (void*)&rtx_args[i];
+        rtx_args[i].timer_num = i;
+        rtx_args[i].shared = &args;
+        timer_create(CLOCK_MONOTONIC, &sig_to, &timers[i]);
+    }
+    if(ADAPTIVE == 1){
+        for(int i=0;i<2;i++){
+            res = pthread_mutex_init(&to_mux[i], NULL);
+            if(res == -1){
+                err_handler(who, "mutex init");
+            }
+            pthread_mutex_lock(&to_mux[i]);
+        }
+    }
+    pthread_rwlock_init(&to_rwlock, NULL);
+
+    n = scandir("./server_files/",&namelist, NULL,alphasort);
+    if (n == -1) {
+        perror("scandir");
+        exit(0);
+    }
+    /*
+     * START ACK_THREAD
+     */
+    res = pthread_create(&tid, NULL, ack_thread, (void*)&args);
+    if(res == -1){
+        err_handler(who, "pthread_create");
+    }
+    while(n>2){
+        sprintf(&pack.data[j*MAX_FILENAME_SIZE], "%s", namelist[n-1]->d_name);
+        //sprintf(arr_nomi[j], "%s", namelist[n]);
+        j++; //indice dell'array di nomi arr_nomi
+        n--; //indice della struct di nomi namelist
+        if(j == NUM_FILENAME_IN_PACK - 1){
+            //pack.data = arr_nomi;
+            pack.seq_num = (pack.seq_num + 1)%MAX_SEQ_NUM;
+
+            while(pack.seq_num > wnd.inf + N){
+                pthread_mutex_lock(&inf_mux);
+                pthread_cond_wait(&inf_cv, &inf_mux);
+                pthread_mutex_unlock(&inf_mux);
+            }
+            res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+            if(res != 0){
+                err_handler("send thread", "spin_lock");
+            }
+            //Array di pacchetti spediti senza ACK
+            //In caso di TIMEOUT ritrasmessi da RETRANSMISSION_THREAD
+            wnd.wnd_buff[pack.seq_num % N] = pack;
+            wnd.acked[pack.seq_num % N] = 0;
+            wnd.sup = pack.seq_num;
+
+            if(ADAPTIVE == 1){
+                if((pthread_mutex_trylock(&to_mux[0])) == 0){
+                    if(AUDIT_TO){
+                        printf("\nsending sample_rtt packet %d\n", pack.seq_num);
+                        res = pthread_rwlock_rdlock(&to_rwlock);
+                        if(res != 0){
+                            err_handler(who, "rdlock");
+                        }
+                        printf("\nTO: sec %ld, nsec %ld\n", timeout.it_value.tv_sec, timeout.it_value.tv_nsec);
+                        res = pthread_rwlock_unlock(&to_rwlock);
+                        if(res != 0){
+                            err_handler(who, "rdlock");
+                        }
+                    }
+                    to_snum = pack.seq_num;
+                    pack.TO = 1;
+                    clock_gettime(CLOCK_MONOTONIC, &send_t);
+                    pthread_mutex_unlock(&to_mux[1]);
+                }
+            }
+            send_packet(sockfd, pack, addr);
+            if(ADAPTIVE == 1){
+                pack.TO = 0;
+            }
+            /*
+             * Avvio timer TIMEOUT
+             */
+            res = pthread_rwlock_rdlock(&to_rwlock);
+            if(res != 0){
+                err_handler(who, "rdlock");
+            }
+            res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+            if(res == -1){
+                err_handler("send thread", "settime");
+            }
+            res = pthread_rwlock_unlock(&to_rwlock);
+            if(res != 0){
+                err_handler(who, "rdlock");
+            }
+            res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+            if(res != 0){
+                err_handler("send thread", "spin_unlock");
+            }
+
+
+            j=0; // azzera il riempimento del pacchetto
+        }
+    }
+    if(pack.last != 1){
+        pack.last = 1;
+        pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
+        while(pack.seq_num > wnd.inf + N){
+            pthread_mutex_lock(&inf_mux);
+            pthread_cond_wait(&inf_cv, &inf_mux);
+            pthread_mutex_unlock(&inf_mux);
+        }
+        res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+        if(res != 0){
+            err_handler("send thread", "spin_lock");
+        }
+        wnd.wnd_buff[pack.seq_num % N] = pack;
+        wnd.acked[pack.seq_num % N] = 0;
+        wnd.sup = pack.seq_num;
+        send_packet(sockfd, pack, addr);
+        res = pthread_rwlock_rdlock(&to_rwlock);
+        if(res != 0){
+            err_handler(who, "rdlock");
+        }
+        res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+        if(res == -1){
+            err_handler("send thread", "settime");
+        }
+        res = pthread_rwlock_unlock(&to_rwlock);
+        if(res != 0){
+            err_handler(who, "unlock");
+        }
+        res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+        if(res != 0){
+            err_handler("send thread", "spin_unlock");
+        }
+    }
+    pthread_join(tid, NULL);
+    printf("\nServer Filename List sent\n");
+    close(sockfd);//TODO
+    exit(0);
 }
 
+/*
 void list_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr) {
     int actread;
     int fd, res;
@@ -646,8 +872,7 @@ void list_request_handler(int sockfd, struct packet pack, struct sockaddr_in add
             }
         }
     }
-
-    ///////////////////////////////////
+*/
 
 int main(int argc, char *argv[]) {
     int listen_sockfd, connection_sockfd;
@@ -726,6 +951,13 @@ int main(int argc, char *argv[]) {
                     err_handler(who, "handshake_server");
                 }
                 get_request_handler(connection_sockfd, pack, addr);
+            }
+            else if (cmd == 3) {
+                res = handshake_server(connection_sockfd, &ctrl_pack, &pack, &addr);
+                if (res == -1) {
+                    err_handler(who, "handshake_server");
+                }
+                list_request_handler(connection_sockfd, pack, addr);
             }
             else{
                 printf("\nrequest from client not recognized\n");

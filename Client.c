@@ -105,7 +105,7 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
     } else {
         return -1;
     }
-    if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2) {
+    if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2 || ctrl_pack->cmd == 3) {
         /*
          * ctrl pack ha #SEQ e #ACK(seq server)
          * servaddr ha nuovo #PORT del server
@@ -156,6 +156,11 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     pthread_rwlock_t to_rwlock;
     int to_snum;
     struct timespec sample_rtt;
+    /*
+     * Prestazioni
+     */
+    struct timespec start_time;
+    struct timespec finish_time;
     /*
      * Altro
      */
@@ -277,6 +282,7 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
             pthread_mutex_lock(&to_mux[i]);
         }
     }
+
     pthread_rwlock_init(&to_rwlock, NULL);
     timeout.it_interval.tv_sec = 0;
     timeout.it_interval.tv_nsec = 0;
@@ -493,6 +499,13 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     struct window wnd;
     int var;
     int n;
+    /*
+     * Prestazioni
+     */
+    long test_sec;
+    long test_nsec;
+    struct timespec start_time;
+    struct timespec finish_time;
 
     char buff[1024];
     struct packet pack;//pacchetto per riceve FILE dal SERVER (e inviare filename)
@@ -544,6 +557,9 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     if(res < 0){
         err_handler(who, "sprintf");
     }
+    if(TEST == 1){
+        clock_gettime(CLOCK_MONOTONIC, &start_time);
+    }
     pack.seq_num = ack_pack.seq_num + 1;//#SEQ + 1 = 1   ultimo pacchetto mandato in handshake(ack_pack) [#SEQ = 0]
     pack.ack_num = ack_pack.ack_num;// #ACK relativo a #SEQ pacchetto SERVER in attesa dell' ACK
     pack.ack = 1;                 ///indica che pacchetto contiene ACK
@@ -560,11 +576,11 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
         err_handler("Get function", "setsockopt");
     }
-    while(recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, (struct sockaddr *)&servaddr, &len) < 0){
+    while(recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, NULL, NULL) < 0){//(struct sockaddr *)&servaddr, &len) < 0){
         if(errno != EINTR){
             if(errno == EWOULDBLOCK){
                 attempts++;
-                if(attempts == 4){
+                if(attempts == 3){
                     printf("\nServer not responding. Closing connection...\n\n");
                     exit(0);
                 }
@@ -670,7 +686,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         err_handler("Get function", "setsockopt");
     }
     while (1) {
-        while(recvfrom(sockfd, (void *) &pack, sizeof(pack), 0,(struct sockaddr *) &servaddr, &len) < 0) {
+        while(recvfrom(sockfd, (void *) &pack, sizeof(pack), 0,NULL, NULL) < 0) {
             if(errno != EINTR){
                 if(errno == EWOULDBLOCK){
                     printf("\nServer stopped sending for too long. Closing connection\n");
@@ -729,6 +745,18 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                         //fflush(file);
                         if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
                             printf("\nClient saved %s successfully\n", path);
+                            if(TEST == 1){
+                                clock_gettime(CLOCK_MONOTONIC, &finish_time);
+
+                                if (finish_time.tv_nsec - start_time.tv_nsec < 0) {
+                                    test_sec = finish_time.tv_sec - start_time.tv_sec - 1;
+                                    test_nsec = MAX_NANOSEC - (start_time.tv_nsec - finish_time.tv_nsec);
+                                } else {
+                                    test_sec = finish_time.tv_sec - start_time.tv_sec;
+                                    test_nsec = finish_time.tv_nsec - start_time.tv_nsec;
+                                }
+                                printf("\n\n---TEST---\ntime: %ld sec, %ld nsec\n", test_sec, test_nsec);
+                            }
                             if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
                                 if(AUDIT == 1){
                                     printf("\nconnection closed correctly\n");
@@ -822,13 +850,15 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
 
 //rilascio alla fine semaforo??
 //SOSTITUIRE EXIT CON RETURN TODO
-void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
+int list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     int len, res;
-    char **filename_list;
+    char *filename_list;
     struct ctrl_packet ack_pack;
-    struct window wnd;
     struct packet pack;
-    struct sembuf s_stdo, w_stdo;
+    struct window wnd;
+    struct sembuf s_stdo;
+    char who[40];
+    sprintf(who, "%s", "List function");
 
     srand(time(0));
 
@@ -845,13 +875,13 @@ void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     s_stdo.sem_op = 1;
     s_stdo.sem_flg = 0;
 
-    filename_list = malloc(sizeof(char *)*NUM_FILENAME_IN_PACK);
+    /*filename_list = malloc(sizeof(char *)*NUM_FILENAME_IN_PACK);
     if(filename == NULL) {
         err_handler(who, "malloc");
     }
-    for(int n=0;n<NUM_FILENAME_IN_PACK;n++){
-        filename_list[n] = (char *)malloc(MAX_FILENAME_SIZE);
-    }
+    for(int n=0;n<NUM_FILENAME_IN_PACK;n++){*/
+        filename_list = (char *)malloc(MAX_FILENAME_SIZE);
+    //}
 
     ack_pack.cmd = 3;
     res = handshake_client(sockfd, &ack_pack, &servaddr, NULL);
@@ -861,16 +891,16 @@ void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     /*
      * ultimo ACK HANDSHAKE
      */
-    ack_pack.seq_num = ack_pack.seq_num + 1;
-    ack_pack.ack_num = ack_pack.ack_num;
-    ack_pack.ack = 1;
+    pack.seq_num = ack_pack.seq_num + 1;
+    pack.ack_num = ack_pack.ack_num;
+    pack.ack = 1;
 
-    wnd.inf = ack_pack.ack_num;
-    wnd.sup = ack_pack.ack_num;//TODO
+    wnd.inf = pack.ack_num;
+    wnd.sup = pack.ack_num;//TODO
 
-    send_ctrl_packet(sockfd, ack_pack, servaddr);
+    send_packet(sockfd, pack, servaddr);
 
-    printf("\n\n-----LIST OF FILES-----\n\n")
+    printf("\n\n-----LIST OF FILES-----\n\n");
 
     int num = 1;
     struct timespec rcv_timeout = {MAX_WAITING_TIME_SEC,0};
@@ -930,21 +960,23 @@ void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                          */
                         filename_list = wnd.wnd_buff[(wnd.inf + 1) % N].data;
                         for(int n=0;n<NUM_FILENAME_IN_PACK;n++){
-                            printf("%d. %s\n", num, filename_list[n]);
-                            num++;
+                            if(filename_list + n*MAX_FILENAME_SIZE != NULL) {
+                                printf("%d. %s\n", num, filename_list + n * MAX_FILENAME_SIZE);
+                                num++;
+                            }
                         }
                         if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {
-                            printf("\n-----END OF LIST-----\n\n", path);
+                            printf("\n-----END OF LIST-----\n\n");
                             if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
                                 if(AUDIT == 1){
                                     printf("\nconnection closed correctly\n");
                                 }
-                                exit(0);
+                                return 0;
                             } else{
                                 if(AUDIT == 1){
                                     printf("\nerror in close connection\n");
                                 }
-                                exit(-1);
+                                return -1;
                             }
                         }
                         wnd.acked[(wnd.inf + 1) % N] = 0;
@@ -1128,12 +1160,12 @@ void main(int argc, char *argv[]) {
                 err_handler(who, "socket");
             }
             //TODO TOGLIERE FORK
-            pid = fork();
-            if (pid == -1) {
-                err_handler(who, "fork");
-            } else if (pid == 0){
+            //pid = fork();
+            //if (pid == -1) {
+             //   err_handler(who, "fork");
+            //} else if (pid == 0){
                 list_function(sockfd, sem_stdout, servaddr);
-            }
+            //}
             res = semop(sem_stdout, &s_stdo, 1);
             if(res == -1){
                 err_handler(who, "semop");
@@ -1152,7 +1184,7 @@ void main(int argc, char *argv[]) {
                 err_handler(who, "semop");
             }
         } else if (strcmp("fill", cmd) == 0) {
-            fill_directory();
+            //fill_directory();
             res = semop(sem_stdout, &s_stdo, 1);
             if(res == -1){
                 err_handler(who, "semop");
