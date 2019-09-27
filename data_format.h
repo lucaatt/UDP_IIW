@@ -4,16 +4,16 @@
 #define UDP_IIW_DATA_FORMAT_H
 
 #define DATA_SIZE 1484
-#define N 3
+#define N 80
 #define MAX_SEQ_NUM 60000
-#define READY_SIZE 5
-//window size
 
 typedef struct packet{
     //int cmd;
     unsigned int seq_num;
     unsigned int ack_num;
+    short TO;
     short ack;
+    short fin;
     short last;
     char data[DATA_SIZE];//AGGIUNGERE 2BYTE DI LAST
 }packet;
@@ -22,6 +22,7 @@ typedef struct ctrl_packet{
     int cmd;
     unsigned int seq_num;
     unsigned int ack_num;
+    short TO;
     short ack;
     short fin;
     short syn;
@@ -37,20 +38,28 @@ typedef struct window{
 typedef struct ack_thread_args{
     struct window *wnd;
     int sockfd;
-    struct sockaddr_in servaddr;
+    struct sockaddr_in *servaddr;
     timer_t *timers;
-    int timer_num;
-    pthread_spinlock_t *locks;
+    struct timespec *send_time;
+    int *to_seq_num;
+    struct itimerspec *timeout;
+    pthread_mutex_t *inf_mux;
+    pthread_cond_t *inf_cv;
+    pthread_mutex_t *to_mutexes;
+    pthread_rwlock_t *to_rwlock;
+    pthread_mutex_t *locks;
 }ack_thread_args;
 
-typedef struct send_thread_args{
-    struct window *wnd;
-    struct packet ready[READY_SIZE];
-    short slots[READY_SIZE];
-    struct sockaddr_in servaddr;
-    int sockfd;
-    timer_t *timers;
-    pthread_spinlock_t *locks;
-}send_thread_args;
+typedef struct rtx_thread_args{
+    int timer_num;
+    struct ack_thread_args *shared;
+}rtx_thread_args;
+
+typedef struct TO_thread_args{
+    struct ack_thread_args *ack_args;
+    struct timespec *ack_time;
+    struct timespec *estim_rtt;
+    struct timespec *dev_rtt;
+}TO_thread_args;
 
 #endif

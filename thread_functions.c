@@ -3,113 +3,98 @@
 #include "shared_functions.h"
 
 /*
- * THREAD INVIA PACCHETTI LETTI E RESI DISPONIBILI DAL MAIN IN ARGS->READY[] (INIZIA A RIEMPIRE DA  POSIZIONE [0])
- * PRIMA DI INVIARE CONTROLLA CHE #SEQ ENTRO LIMITI FINESTRA
- * QUANDO INVIA ATTIVA TIMER PER TIMEOUT E LIBERA SLOT BUFFER PER INSERIMENTO NUOVO PACCHETTO (SLOT[posizine])
+ * Thread avviato per il ricalcolo del TIMEOUT (circa ogni RTT)
  *
- * CONDIVISI DA ACK/RETRANSMISSION_THREAD
- *  ARGS-->  locks: usato per lock risorse condivise con ack/retransmission_thread ( wnd_acked[] , timers[] )
- *                  lock ==>  prima di send_packet e start timer (timer_settime)
- *           wnd:  struct window ==> INF: usato per verificare #SEQ entro limiti finestra  (INF <= SUP)
- *                                     [ultimo #seq in ordine con ack ricevuto]
- *                                   SUP: ( INF < #ACK <= SUP ) -> ack solo pacchetti inviati
- *                                          (INF <= SUP)   -> quando finestra (INF) scorre    ==>  scorre in ack_thread
- *                                         [ultimo(piu grande) #SEQ inviato]
- *                                   WND_BUFF: contiene pacchetti spediti
- *                                              [ritrasmessi se timer nella stessa posizione scade]
- *                                   ACKED[posizione]:  settato a 0 quando pacchetto spedito
- *                                                         [settato a 1 quando ACK ricevuto] -> da ack_thread
- *          ready[]: buffer pacchetti letti dal main pronti per spedizione
- *          slots[]: indica quali posizioni di READY sono libere(vuote)[0] -> pacchetto spedito/ nuovo non disponibile
- *                                                   o occupate  [1]     -> pacchetto da spedire
- *          timers[]: array di TIMER -> timer[#pos] avviato quando pacchetto #pos spedito
- *          servaddr: contiene indirizzo destinatario (server --> PUT)
- *                                                     (client --> GET)
- *          sockfd: descrittore della SOCKET
+ * unlock to_mutex[0] per avvertire MAIN_THREAD che può inviare un nuovo pacchetto sample
  *
  */
-void * send_thread(void * arg){
-    int slot = 0;
-    int res;
-    struct send_thread_args *args = (struct send_thread_args *)arg;
+void * timeout_thread(void * arg){
+    struct TO_thread_args *args = (struct TO_thread_args *)arg;
+    struct ack_thread_args *ack_args = (struct ack_thread_args *)args->ack_args;
+    pthread_mutex_t *mux = &(ack_args->to_mutexes[0]);
+    pthread_rwlock_t *to_rwlock = ack_args->to_rwlock;
+    struct itimerspec *TIMEOUT = ack_args->timeout;
     struct itimerspec timeout;
-    pthread_spinlock_t *locks = args->locks;
-
-    if(ADAPTIVE == 1){
-        if(SAMPLE_RTT_SEC == 0 && SAMPLE_RTT_NSEC == 0){
-
-            timeout.it_value.tv_sec = DEF_TO_SEC;
-            timeout.it_value.tv_nsec = DEF_TO_NSEC;
-        }else{
-            timeout.it_value.tv_sec = SAMPLE_RTT_SEC;
-            timeout.it_value.tv_nsec = SAMPLE_RTT_NSEC;
-        }
-
-        printf("\n\ntimeout.it_value.tv_sec  %ld\n\n",timeout.it_value.tv_sec);
-        printf("\n\ntimeout.it_value.tv_nsec  %ld\n\n",timeout.it_value.tv_nsec);
-        printf("\n\nSAMPLE_RTT_SEC  %ld\n\n",SAMPLE_RTT_SEC);
-        printf("\n\nSAMPLE_RTT_NSEC  %ld\n\n",SAMPLE_RTT_NSEC);
-
-    }else
-    {
-        timeout.it_value.tv_sec = DEF_TO_SEC;
-        timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    struct timespec *send_time = ack_args->send_time;
+    struct timespec *ack_time = args->ack_time;
+    struct timespec *dev_rtt = args->dev_rtt;
+    struct timespec *estim_rtt = args->estim_rtt;
+    struct timespec sample_rtt;
+    long sol_nsec;
+    int res;
+    /*
+     * calcolo SAMPLE_RTT
+     */
+    if (ack_time->tv_nsec - send_time->tv_nsec < 0) {
+        sample_rtt.tv_sec = ack_time->tv_sec - send_time->tv_sec - 1;
+        sample_rtt.tv_nsec = MAX_NANOSEC - (send_time->tv_nsec - ack_time->tv_nsec);
+    } else {
+        sample_rtt.tv_sec = ack_time->tv_sec - send_time->tv_sec;
+        sample_rtt.tv_nsec = ack_time->tv_nsec - send_time->tv_nsec;
     }
-    timeout.it_interval.tv_sec = 0;
-    timeout.it_interval.tv_nsec = 0;
-
-
-    while(1) {
-        while(args->slots[slot] == 0);
-        if((args->ready[slot].seq_num - args->wnd->inf) > 0) {
-            while((args->ready[slot].seq_num - args->wnd->inf) > N);
+    /*
+     * calcolo ESTIMATED_RTT DEVIANCE_RTT TIMEOUT
+     */
+    estim_rtt->tv_nsec = (1-ALPHA)*estim_rtt->tv_nsec + ALPHA*sample_rtt.tv_nsec;
+    estim_rtt->tv_sec = (1-ALPHA)*estim_rtt->tv_sec + ALPHA*sample_rtt.tv_sec;
+    if((sample_rtt.tv_nsec - estim_rtt->tv_nsec) >= 0){
+        dev_rtt->tv_nsec = (1-BETA)*dev_rtt->tv_nsec + BETA*(sample_rtt.tv_nsec - estim_rtt->tv_nsec);
+    } else {
+        dev_rtt->tv_nsec = (1-BETA)*dev_rtt->tv_nsec + BETA*(estim_rtt->tv_nsec - sample_rtt.tv_nsec);
+    }
+    if((sample_rtt.tv_sec - estim_rtt->tv_sec) >= 0){
+        dev_rtt->tv_sec = (1-BETA)*dev_rtt->tv_sec + BETA*(sample_rtt.tv_sec - estim_rtt->tv_sec);
+    } else {
+        dev_rtt->tv_sec = (1-BETA)*dev_rtt->tv_sec + BETA*(estim_rtt->tv_sec - sample_rtt.tv_sec);
+    }
+    timeout.it_value.tv_sec = estim_rtt->tv_sec + 4*dev_rtt->tv_sec;
+    sol_nsec = dev_rtt->tv_nsec + dev_rtt->tv_nsec;
+    for(int i=0;i<2;i++){
+        if(sol_nsec >= MAX_NANOSEC){
+            timeout.it_value.tv_sec = timeout.it_value.tv_sec + 1;
+            sol_nsec = sol_nsec - MAX_NANOSEC;
         }
-        else if((args->ready[slot].seq_num - args->wnd->inf) < 0) {
-            while(((MAX_SEQ_NUM - (args->wnd->inf - args->ready[slot].seq_num)) > N) &&
-                  ((args->ready[slot].seq_num - args->wnd->inf) < 0));
-        }
-
-        /*
-         * LOCK RISORSE CONDIVISE
-         * MANIPOLATE DA SEND/ACK/RETRANSMISSION THREAD
-         */
-        res = pthread_spin_lock(&locks[args->ready[slot].seq_num % N]);
-        if(res != 0){
-            err_handler("send thread", "spin_lock");
-        }
-        args->wnd->wnd_buff[args->ready[slot].seq_num % N] = args->ready[slot];
-        args->wnd->acked[args->ready[slot].seq_num % N] = 0;
-        args->wnd->sup = args->ready[slot].seq_num;
-        send_packet(args->sockfd, args->ready[slot], args->servaddr);
-        res = timer_settime(args->timers[args->ready[slot].seq_num % N], 0, &timeout, NULL);
-        if(res == -1){
-            err_handler("send thread", "settime");
-        }
-        res = pthread_spin_unlock(&locks[args->ready[slot].seq_num % N]);
-        if(res != 0){
-            err_handler("send thread", "spin_unlock");
-        }
-
-        args->slots[slot] = 0;
-        if(args->ready[slot].last == 1) {
-            if(AUDIT == 1) {
-                printf("\nsend_thread exit\n");
-            }
-            pthread_exit(0);
-        }
-        slot = (slot + 1) % READY_SIZE;
+        sol_nsec = sol_nsec + dev_rtt->tv_nsec;
+    }
+    if(sol_nsec >= MAX_NANOSEC){
+        timeout.it_value.tv_sec = timeout.it_value.tv_sec + 1;
+        sol_nsec = sol_nsec - MAX_NANOSEC;
+    }
+    if((estim_rtt->tv_nsec + sol_nsec) >= MAX_NANOSEC) {
+        timeout.it_value.tv_sec = timeout.it_value.tv_sec + 1;
+        timeout.it_value.tv_nsec = estim_rtt->tv_nsec + sol_nsec - MAX_NANOSEC;
+    } else {
+        timeout.it_value.tv_nsec = estim_rtt->tv_nsec + sol_nsec;
+    }
+    if(AUDIT_TO == 1){
+        printf("\n\nest sec: %ld\nest nsec: %ld\ndev sec: %ld\ndev nsec: %ld\nTO sec: %ld\nTO nsec: %ld\n\n",
+                estim_rtt->tv_sec, estim_rtt->tv_nsec, dev_rtt->tv_sec,
+                dev_rtt->tv_nsec, timeout.it_value.tv_sec, timeout.it_value.tv_nsec);
+    }
+    /*
+     * WRITE LOCK VARIABILE TIMEOUT PER COMUNICA A TUTTI I THREAD IL NUOVO VALORE
+     */
+    res = pthread_rwlock_wrlock(to_rwlock);
+    if(res != 0){
+        err_handler("Timeout_thread", "wrlock");
+    }
+    TIMEOUT->it_value.tv_sec = timeout.it_value.tv_sec;
+    TIMEOUT->it_value.tv_nsec = timeout.it_value.tv_nsec;
+    res = pthread_rwlock_unlock(to_rwlock);
+    if(res != 0){
+        err_handler("Timeout_thread", "unlock");
+    }
+    pthread_mutex_unlock(mux);
+    //TODO
+    if(CALC_TIMEOUT_THREAD == 0) {
+        return (void*)0;
+    }else {
+        pthread_exit(0);
     }
 }
 /*
  * Gestisce la ricezione degli ACK e lo spostamento della finestra di spedizione
  */
-
-void * close_connection(void *arg){
-
-
-}
-
-
 void * ack_thread(void * arg){
     struct ack_thread_args *args = (struct ack_thread_args *)arg;
     struct window *wnd;
@@ -117,39 +102,49 @@ void * ack_thread(void * arg){
     struct ctrl_packet ack_pack;
     char who[30];
     int n;
-    pthread_spinlock_t *locks = args->locks;
-
+    pthread_mutex_t *locks = args->locks;
+    struct sockaddr_in addr;
+    int len = sizeof(addr);
+    pthread_t tid;
     struct itimerspec stop_to;
-
-    if(ADAPTIVE == 1){
-        if(SAMPLE_RTT_SEC == 0 && SAMPLE_RTT_NSEC == 0){
-
-            stop_to.it_value.tv_sec = 0;
-            stop_to.it_value.tv_nsec = 0;
-        }else{
-            stop_to.it_value.tv_sec = SAMPLE_RTT_SEC;
-            stop_to.it_value.tv_nsec = SAMPLE_RTT_NSEC;
-        }
-    } else{
-
-        stop_to.it_value.tv_sec = 0;
-        stop_to.it_value.tv_nsec = 0;
-
-    }
-
-    //stop_to.it_value.tv_sec = 0;
-    //stop_to.it_value.tv_nsec = 0;
-
-    stop_to.it_interval.tv_sec = 0;
-    stop_to.it_interval.tv_nsec = 0;
-
-    sprintf(who, "%s", "Client ack_thread");
     wnd = args -> wnd;
     sockfd = args -> sockfd;
 
-    while(1) {//GESTIRE MAX_SEQ_NUM
+    sprintf(who, "%s", "Client ack_thread");
 
-        res = recvfrom(sockfd, (void *) &ack_pack, sizeof(ack_pack), 0, NULL, NULL);
+    stop_to.it_value.tv_sec = 0;
+    stop_to.it_value.tv_nsec = 0;
+    stop_to.it_interval.tv_sec = 0;
+    stop_to.it_interval.tv_nsec = 0;
+
+    pthread_mutex_t *inf_mux = args->inf_mux;
+    pthread_cond_t *inf_cv = args->inf_cv;
+    //ADAPTIVE == 1
+        struct timespec *send_time = args->send_time;
+        int *to_snum = args->to_seq_num;
+        pthread_mutex_t *to_mux = args->to_mutexes;
+        struct itimerspec *timeout = args->timeout;
+        struct timespec estim_rtt, dev_rtt;
+        struct timespec sample_rtt, ack_time;
+        dev_rtt.tv_sec = 0;
+        dev_rtt.tv_nsec = 0;
+        estim_rtt.tv_sec = timeout->it_value.tv_sec;
+        estim_rtt.tv_nsec = timeout->it_value.tv_nsec;
+
+        /*
+         * Argomenti timeout_thread
+         */
+        struct TO_thread_args to_args;
+        to_args.ack_args = args;
+        to_args.ack_time = &ack_time;
+        to_args.dev_rtt = &dev_rtt;
+        to_args.estim_rtt = &estim_rtt;
+    /*
+     * Rcezione ACK e scorrimento finestra
+     */
+    while(1) {
+
+        res = recvfrom(sockfd, (void *) &ack_pack, sizeof(ack_pack), 0, (struct sockaddr *)&addr, &len);
         if (res < 0) {
             err_handler(who, "recvfrom");
         }
@@ -160,7 +155,8 @@ void * ack_thread(void * arg){
                     *   LOCK RISORSE CONDIVISE
                     * MANIPOLATE DA SEND/ACK/RETRANSMISSION THREAD
                     */
-                    res = pthread_spin_lock(&locks[ack_pack.ack_num % N]);
+                    //res = pthread_spin_lock(&locks[ack_pack.ack_num % N]);
+                    res = pthread_mutex_lock(&locks[ack_pack.ack_num % N]);
                     if(res != 0){
                         err_handler("send thread", "spin_lock");
                     }
@@ -169,9 +165,96 @@ void * ack_thread(void * arg){
                     if(AUDIT_ACK == 1) {
                         printf("\nACK ricevuto: %d\n", ack_pack.ack_num);
                     }
-                    res = pthread_spin_unlock(&locks[ack_pack.ack_num % N]);
+                    //res = pthread_spin_unlock(&locks[ack_pack.ack_num % N]);
+                    res = pthread_mutex_unlock(&locks[ack_pack.ack_num % N]);
                     if(res != 0){
                         err_handler("send thread", "spin_unlock");
+                    }
+                    if(ADAPTIVE == 1){
+                        if(pthread_mutex_trylock(&to_mux[1]) == 0) {
+                            if (ack_pack.ack_num == *to_snum) {
+                                clock_gettime(CLOCK_MONOTONIC, &ack_time);
+                                if (ack_pack.TO == 1) {
+                                    //TODO
+                                    if(CALC_TIMEOUT_THREAD == 0) {
+                                        if (AUDIT_TO == 1) {
+                                            printf("\nENTRA IN TO\n");
+                                        }
+                                        timeout_thread((void *) &to_args);
+                                        if (AUDIT_TO == 1) {
+                                            printf("\nESCE DA TO\n");
+                                        }
+                                    } else {
+                                        if (pthread_create(&tid, NULL, timeout_thread, (void *) &to_args) == -1) {
+                                            err_handler(who, "pthread_create");
+                                        }
+                                    }
+                                    if (AUDIT_TO == 1) {
+                                        printf("\nACK %d TO\n", ack_pack.ack_num);
+                                    }
+                                } else {//TODO SAMPLE RTT NO ACK_TIME
+                                    if (AUDIT_TO == 1) {
+                                        printf("\n#ACK = #TO = %d MA TO = 0\n", ack_pack.ack_num);
+                                    }
+                                    if (ack_time.tv_nsec - send_time->tv_nsec < 0) {
+                                        sample_rtt.tv_sec = ack_time.tv_sec - send_time->tv_sec - 1;
+                                        sample_rtt.tv_nsec = MAX_NANOSEC - (send_time->tv_nsec - ack_time.tv_nsec);
+                                    } else {
+                                        sample_rtt.tv_sec = ack_time.tv_sec - send_time->tv_sec;
+                                        sample_rtt.tv_nsec = ack_time.tv_nsec - send_time->tv_nsec;
+                                    }
+                                    if (sample_rtt.tv_sec < timeout->it_value.tv_sec) {
+                                        ack_time.tv_sec = ack_time.tv_sec + timeout->it_value.tv_sec;
+                                        //TODO
+                                        if(CALC_TIMEOUT_THREAD == 0) {
+                                            if (AUDIT_TO == 1) {
+                                                printf("\nENTRA IN TO\n");
+                                            }
+                                            timeout_thread((void *) &to_args);
+                                            if (AUDIT_TO == 1) {
+                                                printf("\nESCE DA TO\n");
+                                            }
+                                        } else {
+                                            if (pthread_create(&tid, NULL, timeout_thread, (void *) &to_args) == -1) {
+                                                err_handler(who, "pthread_create");
+                                            }
+                                        }
+                                        if (AUDIT_TO == 1) {
+                                            printf("\nACK %d TO = 0 , sample_sec<timeour_sec\n", ack_pack.ack_num);
+                                        }
+                                    } else if(sample_rtt.tv_sec == timeout->it_value.tv_sec && sample_rtt.tv_nsec <= timeout->it_value.tv_nsec){
+                                       if(ack_time.tv_nsec + timeout->it_value.tv_nsec >= MAX_NANOSEC){
+                                           ack_time.tv_sec = ack_time.tv_sec + 1;
+                                       } else{
+                                           ack_time.tv_nsec = ack_time.tv_nsec + timeout->it_value.tv_nsec;
+                                       }
+                                        //TODO
+                                        if(CALC_TIMEOUT_THREAD == 0) {
+                                            if (AUDIT_TO == 1) {
+                                                printf("\nENTRA IN TO\n");
+                                            }
+                                            timeout_thread((void *) &to_args);
+                                            if (AUDIT_TO == 1) {
+                                                printf("\nESCE DA TO\n");
+                                            }
+                                        } else {
+                                            if (pthread_create(&tid, NULL, timeout_thread, (void *) &to_args) == -1) {
+                                                err_handler(who, "pthread_create");
+                                            }
+                                        }
+                                        if (AUDIT_TO == 1) {
+                                            printf("\nACK %d TO = 0 , sample_nanosec<timeout_nanosec\n", ack_pack.ack_num);
+                                        }
+
+                                    } else {
+                                        pthread_mutex_unlock(&to_mux[0]);
+                                    }
+                                }
+
+                            } else {
+                                pthread_mutex_unlock(&to_mux[1]);
+                            }
+                        }
                     }
                     if (ack_pack.ack_num == wnd->inf + 1) {
                         while ((wnd->acked[(wnd->inf + 1) % N] == 1) && (wnd->inf < wnd->sup)) {
@@ -180,6 +263,9 @@ void * ack_thread(void * arg){
                                 printf("\nFinestra spediti [%d, %d]\n", wnd->inf, wnd->sup);
                             }
                         }
+                        pthread_mutex_lock(inf_mux);
+                        pthread_cond_broadcast(inf_cv);
+                        pthread_mutex_unlock(inf_mux);
                     }
                 }
             }
@@ -204,10 +290,23 @@ void * ack_thread(void * arg){
         } else {
             //CONFERMA RICEZIONE SERVER
             if(ack_pack.fin == 1) {
-                if(AUDIT == 1) {
-                    printf("\nACK THREAD ESCE\n");
+                for(int i=0;i<N;i++){
+                    args->wnd->acked[i] = 1;
+                    if(timer_delete(args->timers[i]) != 0){
+                        err_handler("Ack thread", "timer_delete");
+                    }
                 }
-                pthread_exit(0);
+                if(confirm_close_connection(sockfd,addr) == 0){
+                    if(AUDIT == 1) {
+                        printf("\nconnection closed correctly.ACK_THREAD EXIT\n");
+                    }
+                    pthread_exit(0);
+                } else {
+                    if (AUDIT == 1) {
+                        printf("\nerror in close connection.ACK_THREAD EXIT\n");
+                    }
+                    pthread_exit(0);
+                }
             }
         }
     }
@@ -217,57 +316,80 @@ void * ack_thread(void * arg){
  * IL THREAD PARTE QUANDO IL TIMER[TIMER_NUM] SCADE INDICANDO UN TIMEOUT
  */
 void retransmission_thread(union sigval arg){
-    struct ack_thread_args *args = (struct ack_thread_args *)arg.sival_ptr;
-    int timer_num = args->timer_num;
+    struct rtx_thread_args *rtx_args = (struct rtx_thread_args *)arg.sival_ptr;
+    struct ack_thread_args *args = rtx_args->shared;
+    int timer_num = rtx_args->timer_num;
     struct window *wnd= args->wnd;
     int sockfd = args->sockfd;
+    pthread_rwlock_t *to_rwlock = args->to_rwlock;
     int res;
-    pthread_spinlock_t * locks = args->locks;
+    pthread_mutex_t * locks = args->locks;
 
-    struct itimerspec timeout;
+    struct itimerspec *timeout = args->timeout;
     struct itimerspec timer_state;
 
-
-    if(ADAPTIVE == 1){
-        if(SAMPLE_RTT_SEC == 0 && SAMPLE_RTT_NSEC == 0){
-
-            timeout.it_value.tv_sec = SAMPLE_RTT_SEC;
-            timeout.it_value.tv_nsec = SAMPLE_RTT_NSEC;
-        }else{
-            timeout.it_value.tv_sec = DEF_TO_SEC;
-            timeout.it_value.tv_nsec = DEF_TO_NSEC;
-        }
-    }else
-    {
-        timeout.it_value.tv_sec = DEF_TO_SEC;
-        timeout.it_value.tv_nsec = DEF_TO_NSEC;
-    }
-
-    timeout.it_interval.tv_sec = 0;
-    timeout.it_interval.tv_nsec = 0;
-
+    struct timespec *send_time = args->send_time;
+    int *to_snum = args->to_seq_num;
+    pthread_mutex_t *to_mux = args->to_mutexes;
     timer_t timer = args->timers[timer_num];
 
 
     //spinlock
     //if timer disarmed && !ACK
-    res = pthread_spin_lock(&locks[timer_num]);
+    //res = pthread_spin_lock(&locks[timer_num]);
+    res = pthread_mutex_lock(&locks[timer_num]);
     if(res != 0){
         err_handler("send thread", "spin_lock");
     }
     timer_gettime(timer, &timer_state);
     if(((timer_state.it_value.tv_sec) == 0 && (timer_state.it_value.tv_nsec) == 0)  &&  (wnd->acked[timer_num] != 1)) {
-        send_packet(sockfd, wnd->wnd_buff[timer_num], args->servaddr);
-        res = timer_settime(timer, 0, &timeout, NULL);
+        /////////////////////////////////////////////////////////////////////////////////////
+        if(ADAPTIVE == 1){
+            if((pthread_mutex_trylock(&to_mux[0])) == 0){
+                if(AUDIT_TO){
+                    printf("\nrtx sending sample_rtt packet %d\n", wnd->wnd_buff[timer_num].seq_num);
+                    res = pthread_rwlock_rdlock(to_rwlock);
+                    if(res != 0){
+                        err_handler("Retransmission thread", "rdlock");
+                    }
+                    printf("\nrtx_TO: sec %ld, nsec %ld\n", timeout->it_value.tv_sec, timeout->it_value.tv_nsec);
+                    res = pthread_rwlock_unlock(to_rwlock);
+                    if(res != 0){
+                        err_handler("Retransmission thread", "unlock");
+                    }
+                }
+                *to_snum = wnd->wnd_buff[timer_num].seq_num;
+                wnd->wnd_buff[timer_num].TO = 1;
+                clock_gettime(CLOCK_MONOTONIC, send_time);
+                pthread_mutex_unlock(&to_mux[1]);
+                send_packet(sockfd, wnd->wnd_buff[timer_num], *(args->servaddr));
+                wnd->wnd_buff[timer_num].TO = 0;
+            } else {
+                send_packet(sockfd, wnd->wnd_buff[timer_num], *(args->servaddr));
+            }
+        }
+        else{
+            send_packet(sockfd, wnd->wnd_buff[timer_num], *(args->servaddr));
+        }
+        res = pthread_rwlock_rdlock(to_rwlock);
+        if(res != 0){
+            err_handler("Retransmission thread", "rdlock");
+        }
+        res = timer_settime(timer, 0, timeout, NULL);
         if(res == -1){
             err_handler("retx thread", "settime");
+        }
+        res = pthread_rwlock_unlock(to_rwlock);
+        if(res != 0){
+            err_handler("Retransmission thread", "unlock");
         }
         if(AUDIT_SEND == 1) {
             printf("\nritrasmissione pack: %d\n", wnd->wnd_buff[timer_num].seq_num);
         }
     }
     //spinunlock
-    res = pthread_spin_unlock(&locks[timer_num]);
+    //res = pthread_spin_unlock(&locks[timer_num]);
+    res = pthread_mutex_unlock(&locks[timer_num]);
     if(res != 0){
         err_handler("send thread", "spin_unlock");
     }

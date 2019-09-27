@@ -6,7 +6,6 @@
 #define IP_LOOPBACK "127.0.0.1"
 #define IP_SIZE 16
 
-
 void event_handler() {
     printf("\n");
 }
@@ -23,14 +22,19 @@ void event_handler() {
  *                 (conterrà alla fine NUOVO #PORTA SERVER)
  *                 (USARE SERVADDR NELLE SUCCESSIVE "SEND_PACKET")
 */
-int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_in *servaddr) {
+int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_in *servaddr, struct timespec *sample_rtt) {
     struct ctrl_packet rcv_pack;
-    ctrl_pack->seq_num = 0;//rand();
+    ctrl_pack->seq_num = 0;
     ctrl_pack->syn = 1;
     int len, res;
     struct timespec connection_timeout = {2,0};
+    struct timespec send_time, ack_time;//////////////////////////////////////////
     int attempts = 0;
 
+    ////////////////////////////////////////////////////////////////////////////
+    if(sample_rtt != NULL) {
+        clock_gettime(CLOCK_MONOTONIC, &send_time);
+    }
     send_ctrl_packet(sockfd, *ctrl_pack, *servaddr);
 
     len = sizeof(*servaddr);
@@ -60,6 +64,9 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
                 if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
                     err_handler("Handshake", "setsockopt");
                 }
+                if(sample_rtt != NULL) {
+                    clock_gettime(CLOCK_MONOTONIC, &send_time);
+                }
                 send_ctrl_packet(sockfd, *ctrl_pack, *servaddr);
             }
             else{
@@ -67,6 +74,23 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
             }
         }
     }
+
+
+/*
+ * CALCOLO SAMPLE RTT
+ */
+    if(sample_rtt != NULL) {
+        clock_gettime(CLOCK_MONOTONIC, &ack_time);
+        if (ack_time.tv_nsec - send_time.tv_nsec < 0) {
+            sample_rtt->tv_sec = ack_time.tv_sec - send_time.tv_sec - 1;
+            sample_rtt->tv_nsec = 1000000000 - (send_time.tv_nsec - ack_time.tv_nsec);
+        } else {
+            sample_rtt->tv_sec = ack_time.tv_sec - send_time.tv_sec;
+            sample_rtt->tv_nsec = ack_time.tv_nsec - send_time.tv_nsec;
+        }
+    }
+
+
     connection_timeout.tv_sec = 0;
     connection_timeout.tv_nsec = 0;
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
@@ -96,225 +120,57 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
     return 0;
 }
 
-/*
-void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr) {
-    int fd, len, res;
-    FILE *file;
-    char path[1520], *filename;
-    char who[40];
-    struct ctrl_packet ack_pack;
-    struct packet pack;
-    struct window wnd;
-    int var;
-    int n;
-    struct sembuf s_stdo, w_stdo;
-
-    //wnd.inf = pack.seq_num;
-    //wnd.sup = pack.seq_num;
-
-    filename = (char *)malloc(MAX_FILENAME_SIZE);
-    if(filename == NULL) {
-        err_handler(who, "malloc");
-    }
-
-    memset((void *) &pack, 0, sizeof(pack));
-
-
-    res = handshake_client(sockfd, &ack_pack, &servaddr);
-    if (res == -1) {
-        err_handler(who, "handshake_client");
-    }
-
-    pack.seq_num = 1;
-    pack.ack_num = 0;
-
-    w_stdo.sem_num = 0;
-    w_stdo.sem_op = -1;
-    w_stdo.sem_flg = 0;
-    s_stdo.sem_num = 0;
-    s_stdo.sem_op = 1;
-    s_stdo.sem_flg = 0;
-
-    len = sizeof(servaddr);
-    printf(who, "%s", "Client GET\n");
-
-
-    printf("\nEnter filename to receive: ");
-
-    getfrom_stdin(filename, "Enter filename to receive: ", who, "scanf");
-    res = semop(sem_stdout, &s_stdo, 1);
-    if (res == -1) {
-        err_handler(who, "semop");
-    }
-    res = sprintf(pack.data, "%s", filename);
-    if (res < 0) {
-        err_handler(who, "sprintf");
-    }
-    printf("\nfilename in data %s\n",filename);
-
-    send_packet(sockfd, pack, servaddr);
-    ack_pack.ack = 1;
-    ack_pack.ack_num = pack.seq_num;
-    //printf("ACK: %d\n", ack_pack.ack_num);
-    //send_ctrl_packet(sockfd, ack_pack, servaddr);
-
-    //printf("Client sta ricevendo il file %s dal Server", filename);
-    //sprintf(path, "./client_files/%s", filename);
-    /*while ((fd = open(path, O_CREAT | O_RDWR | O_TRUNC, 0660)) == -1) {
-        if (errno != EINTR) {
-            err_handler(who, "open");
-        }
-    }
-    file = fdopen(fd, "w+");
-    if (file == NULL) {
-        err_handler(who, "fdopen");
-    }
-    while (1) {
-
-        memset((void *) pack.data, 0, sizeof(DATA_SIZE));
-        res = recvfrom(sockfd, (void *) &pack, sizeof(pack), 0, (
-                struct sockaddr *) &servaddr, &len);
-        printf("\nricevuto pack: %d\n", pack.seq_num);
-        if (res < 0) {
-            err_handler(who, "recvfrom");
-        }
-
-        if (((wnd.inf + N) % MAX_SEQ_NUM) > wnd.inf) {
-            if ((pack.seq_num <= wnd.inf + N) && (pack.seq_num > wnd.inf)) {
-                if (pack.seq_num > wnd.sup) {
-                    wnd.sup = pack.seq_num;
-                }
-                wnd.wnd_buff[pack.seq_num % N] = pack;
-                wnd.acked[pack.seq_num % N] = 1;
-                ack_pack.ack_num = pack.seq_num;
-                sleep(1);
-                printf("\nACK: %d\n", pack.seq_num);
-                send_ctrl_packet(sockfd, ack_pack, servaddr);
-                if (pack.seq_num == wnd.inf + 1) {
-                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)) {
-                        res = fprintf(file, "%s", wnd.wnd_buff[(wnd.inf + 1) % N].data);
-                        printf("\nscritto: %d\n", wnd.inf + 1);
-                        if (res < 0) {
-                            err_handler(who, "fprintf");
-                        }
-                        fflush(file);
-                        if (pack.last == 1) {
-                            printf("\nClient ha salvato con successo: %s \n", path);
-                            exit(0);
-                        }
-                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
-                    }
-                }
-            } else if (pack.seq_num <= wnd.inf) {
-                ack_pack.ack_num = pack.seq_num;
-                send_ctrl_packet(sockfd, ack_pack, servaddr);
-            }
-        } else if (((wnd.inf + N) % MAX_SEQ_NUM) < wnd.inf) {
-            if (pack.seq_num < ((wnd.inf + N) % MAX_SEQ_NUM)) {
-                if (wnd.sup >= wnd.inf) {
-                    wnd.sup = pack.seq_num;
-                } else if (pack.seq_num > wnd.sup) {
-                    wnd.sup = pack.seq_num;
-                }
-                wnd.wnd_buff[pack.seq_num % N] = pack;
-                wnd.acked[pack.seq_num % N] = 1;
-                ack_pack.ack_num = pack.seq_num;
-                send_ctrl_packet(sockfd, ack_pack, servaddr);
-                if (pack.seq_num == ((wnd.inf + 1) % N)) {
-                    var = wnd.sup;
-                    if (wnd.sup < wnd.inf) {
-                        var = MAX_SEQ_NUM + wnd.sup;
-                    }
-                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)) {
-                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
-                        if (wnd.sup > wnd.inf) {
-                            var = wnd.sup;
-                        }
-
-                    }
-                }
-            } else if (pack.seq_num > wnd.inf) {
-                if (wnd.sup >= wnd.inf) {
-                    if (pack.seq_num > wnd.sup) {
-                        wnd.sup = pack.seq_num;
-                    }
-                }
-                wnd.wnd_buff[pack.seq_num % N] = pack;
-                wnd.acked[pack.seq_num % N] = 1;
-                ack_pack.ack_num = pack.seq_num;
-                send_ctrl_packet(sockfd, ack_pack, servaddr);
-                if (pack.seq_num == wnd.inf + 1) {
-                    var = wnd.sup;
-                    if (wnd.sup < wnd.inf) {
-                        var = MAX_SEQ_NUM + wnd.sup;
-                    }
-                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)) {
-                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
-                        if (wnd.sup > wnd.inf) {
-                            var = wnd.sup;
-                        }
-                    }
-                }
-            } else if ((pack.seq_num <= wnd.inf) && (pack.seq_num >= wnd.inf - N)) {
-                ack_pack.ack_num = pack.seq_num;
-                send_ctrl_packet(sockfd, ack_pack, servaddr);
-            }
-        }
-    }
-}
-*/
-/*
-void close_server(int sockfd, struct sockaddr_in servaddr){
+void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
+    /*
+     * Spedizione PACCHETTI
+     */
     struct packet pack;
     struct ctrl_packet ctrl_pack;
+    //Usati per attesa Main Thread scorrimento finestra
+    pthread_cond_t inf_cv;
+    pthread_mutex_t inf_mux;
+    pthread_cond_init(&inf_cv, NULL);
+    pthread_mutex_init(&inf_mux, NULL);
+    /*
+     * Gestione File
+     */
+    int actread;
+    int fd;
+    char *filename, buff[1024];
+    /*
+     * Gestione Finestra di spedizione e ritrasmissione
+     */
+    struct window wnd;
+    //Retransmission thread
+    struct rtx_thread_args rtx_args[N];
+    struct sigevent sig_to;
+    //ACK thread
+    struct ack_thread_args args;
+    //condivise
+    pthread_mutex_t locks[N];
+    //TIMEOUT
+    timer_t timers[N];
+    struct itimerspec timeout;
+    struct timespec send_t;
+    pthread_mutex_t to_mux[2];
+    pthread_rwlock_t to_rwlock;
+    int to_snum;
+    struct timespec sample_rtt;
+    /*
+     * Altro
+     */
     int res;
     char who[11];
-
-    memset((void *) &ctrl_pack, 0, sizeof(ctrl_pack));
-
-
-    ctrl_pack.cmd = 4;
-
-    res = handshake_client(sockfd, &ctrl_pack, &servaddr);
-    if (res == -1) {
-        err_handler(who, "handshake_client");
-    }
-}
-*/
-
-void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
-    int actread;
-    int fd, res;
-    char buff[1024], *filename, who[11];
-    struct packet pack;
-    struct sembuf s_stdo, w_stdo;
-    struct ctrl_packet ctrl_pack;
-    struct window wnd;
+    struct sembuf s_stdo;
     pid_t ppid;
+    pthread_t tid;
     int n;
 
-
-    struct send_thread_args send_args;
-    struct ack_thread_args args[N];
-    struct sigevent sig_to;
-    pthread_spinlock_t locks[N];
-
-    struct itimerspec timeout;
-
-    timeout.it_value.tv_sec = DEF_TO_SEC;
-    timeout.it_value.tv_nsec = DEF_TO_NSEC;
-    timeout.it_interval.tv_sec = 0;
-    timeout.it_interval.tv_nsec = 0;
-
-    w_stdo.sem_num = 0;
-    w_stdo.sem_op = -1;
-    w_stdo.sem_flg = 0;
     s_stdo.sem_num = 0;
     s_stdo.sem_op = 1;
     s_stdo.sem_flg = 0;
 
     srand(time(0));//NECESSARIO PER GENERARE OGNI VOLTA SEQUENZE DIVERSE DI NUMERI PSEUDORANDOM
-
 
     ppid = getppid();
     memset((void*)&ctrl_pack, 0, sizeof(ctrl_pack));
@@ -322,178 +178,297 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     memset((void*)&pack, 0, sizeof(pack));
 
     sprintf(who, "%s", "Client PUT");
-    ctrl_pack.cmd = 1;
 
-
-    filename = (char *)malloc(MAX_FILENAME_SIZE);
-    if(filename == NULL) {
-        err_handler(who, "malloc");
-    }
-    printf("\nEnter filename to send: ");
-
-    getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
-    res = semop(sem_stdout, &s_stdo, 1);
-    if(res == -1){
-        err_handler(who, "semop");
-    }
     /*
-* SPINLOCK DEI TIMER
-* inizializzazione spinlock -> lock prima di spedire pacchetto reativo al TIMER
-*                              unlock dopo START(send_thread o retrans_thread) e STOP(ack_thread) TIMER
-*                                                wnd_acked = 0                       wnd_acked = 1
-*/
-
-    for(int i=0; i<N; i++){
-        res = pthread_spin_init(&locks[i], PTHREAD_PROCESS_PRIVATE);
-        if(res != 0){
-            err_handler(who, "spinlock init");
+    * TIMER MUTEX
+    * inizializzazione mutex -> lock prima di spedire pacchetto reativo al TIMER
+    *                              unlock dopo START(send_thread o retrans_thread) e STOP(ack_thread) TIMER
+    *                                                wnd_acked = 0                       wnd_acked = 1
+    */
+    for(int n=0;n<N;n++){
+        wnd.acked[n] = 0;
+        res = pthread_mutex_init(&locks[n], NULL);
+        if(res == -1){
+            err_handler(who, "mutex init");
         }
     }
-
-
-    res = sprintf(pack.data, "%s", filename);
-    if(res < 0){
-        err_handler(who, "sprintf");
-    }
-
-    for(n=0;n<N;n++){
-        wnd.acked[n] = 0;
-    }
-
-    pthread_t tid[2];
-
+    /*
+     * Argomenti da passare ad ack_thread e retransmission_thread
+     */
     sig_to.sigev_notify = SIGEV_THREAD;
     sig_to.sigev_notify_function = &retransmission_thread;
-    timer_t timers[N];
-    send_args.timers = timers;
-    send_args.locks = locks;
+
+    args.sockfd = sockfd;
+    args.wnd = &wnd;
+    args.timers = timers;
+    args.locks = locks;
+    args.servaddr = &servaddr;
+    args.send_time = &send_t;
+    args.timeout = &timeout;
+    args.to_mutexes = to_mux;
+    args.to_seq_num = &to_snum;
+    args.inf_cv = &inf_cv;
+    args.inf_mux = &inf_mux;
+    args.to_rwlock = &to_rwlock;
     for(int i=0;i<N;i++){
-        sig_to.sigev_value.sival_ptr = (void*)&args[i];
-        args[i].sockfd = sockfd;
-        args[i].wnd = &wnd;
-        args[i].timer_num = i;
-        args[i].timers = timers;
-        args[i].locks = locks;
-        args[i].servaddr = servaddr;
+        sig_to.sigev_value.sival_ptr = (void*)&rtx_args[i];
+        rtx_args[i].timer_num = i;
+        rtx_args[i].shared = &args;
         timer_create(CLOCK_MONOTONIC, &sig_to, &timers[i]);
     }
 
-    res = handshake_client(sockfd, &ctrl_pack, &servaddr);
-    if(res == -1){
-        err_handler(who, "handshake_client");
-    }
-
-/*
-    memset((void*)&pack, 0, sizeof(pack));
+    /*
+     * INIZIO CONNESSIONE
+     */
+    /*
+     * CMD 1 indica al Server richiesta PUT
+     */
+    ctrl_pack.cmd = 1;
+    /*
+     * Inserire nome del File da spedire al Server
+     */
     filename = (char *)malloc(MAX_FILENAME_SIZE);
     if(filename == NULL) {
         err_handler(who, "malloc");
     }
-
     printf("\nEnter filename to send: ");
-
     getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
     res = semop(sem_stdout, &s_stdo, 1);
     if(res == -1){
         err_handler(who, "semop");
     }
-
-    for(int i=0; i<N; i++){
-        res = pthread_spin_init(&locks[i], PTHREAD_PROCESS_PRIVATE);
-        if(res != 0){
-            err_handler(who, "spinlock init");
-        }
-    }
-
-
-    res = sprintf(pack.data, "%s", filename);
-    if(res < 0){
-        err_handler(who, "sprintf");
-    }
-  */
-    pack.seq_num = ctrl_pack.seq_num + 1;
-    pack.ack_num = ctrl_pack.ack_num;
-    pack.ack = 1;
-
-    wnd.inf = pack.seq_num - 1;
-    wnd.sup = pack.seq_num;
-
-    for(int i=0;i<N;i++){
-        args[i].servaddr = servaddr;
-    }
-
-    res = pthread_create(&tid[0], NULL, ack_thread, (void*)&args[0]);
-    if(res == -1){
-        err_handler(who, "pthread_create");
-    }
-
-    wnd.wnd_buff[pack.seq_num % N] = pack;
-    wnd.acked[pack.seq_num % N] = 0;
-    send_packet(sockfd, pack, servaddr);
-
-    res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
-    if(res == -1){
-        err_handler("send thread", "settime");
-    }
-
-    while((wnd.sup - wnd.inf) != 0);
-
+    //Apertura FILE
     sprintf(buff, "./client_files/%s", filename);
     while((fd = open(buff, O_RDONLY)) == -1){
         if(errno != EINTR){
             err_handler(who, "open");
         }
     }
-    actread = 0;
-    pack.ack = 0;
-    memset((void*)pack.data, 0, sizeof(DATA_SIZE));
-
-    send_args.sockfd = sockfd;
-    send_args.wnd = &wnd;
-    send_args.servaddr = servaddr;
-
-    for(int i;i<READY_SIZE;i++){
-        send_args.slots[i] = 0;
+    res = sprintf(pack.data, "%s", filename);
+    if(res < 0){
+        err_handler(who, "sprintf");
     }
-    res = pthread_create(&tid[1], NULL, send_thread, (void*)&send_args);
+    /*
+     * HANDSHAKE CON SERVER
+     */
+    if(ADAPTIVE == 0) {
+        res = handshake_client(sockfd, &ctrl_pack, &servaddr, NULL);
+        if(res == -1){
+            err_handler(who, "handshake_client");
+        }
+        timeout.it_value.tv_sec = DEF_TO_SEC;
+        timeout.it_value.tv_nsec = DEF_TO_NSEC;
+    }
+    else if(ADAPTIVE == 1){
+        res = handshake_client(sockfd, &ctrl_pack, &servaddr, &sample_rtt);
+        if(res == -1){
+            err_handler(who, "handshake_client");
+        }
+        timeout.it_value.tv_sec = sample_rtt.tv_sec;
+        timeout.it_value.tv_nsec = sample_rtt.tv_nsec;
+        if(AUDIT_TO == 1){
+            printf("\ndopo handshake TO sec %ld, nsec %ld\n", timeout.it_value.tv_sec, timeout.it_value.tv_nsec);
+        }
+        for(int i=0;i<2;i++){
+            res = pthread_mutex_init(&to_mux[i], NULL);
+            if(res == -1){
+                err_handler(who, "mutex init");
+            }
+            pthread_mutex_lock(&to_mux[i]);
+        }
+    }
+    pthread_rwlock_init(&to_rwlock, NULL);
+    timeout.it_interval.tv_sec = 0;
+    timeout.it_interval.tv_nsec = 0;
+    /*
+     * INIZIALIZZAZIONE #SEQ E FINESTRA DOPO HANDSHAKE
+     */
+    pack.seq_num = ctrl_pack.seq_num + 1;
+    pack.ack_num = ctrl_pack.ack_num;
+    pack.ack = 1;
+    wnd.inf = pack.seq_num - 1;
+    wnd.sup = pack.seq_num;
+    /*
+     * Avvio ack_thread
+     */
+    res = pthread_create(&tid, NULL, ack_thread, (void*)&args);
     if(res == -1){
         err_handler(who, "pthread_create");
     }
-    int slot = 0;
-    /////////////////////////////////////////////////////////////////////vedi qui
-    while((res = read(fd, (void*)&(pack.data[actread]), 1)) != 0){
-        if(res == -1){
-            if(errno != EINTR){
+    /*----------------------------------------------
+     * INIZIO Invio pacchetto con nome File
+     */
+    wnd.wnd_buff[pack.seq_num % N] = pack;
+    wnd.acked[pack.seq_num % N] = 0;
+    if(ADAPTIVE == 1) {
+        to_snum = pack.seq_num;
+        pack.TO = 1;
+        clock_gettime(CLOCK_MONOTONIC, &send_t);
+        /*
+         * Avverti ack_thread avvenuto invio pacchetto sample_rtt
+         */
+        pthread_mutex_unlock(&to_mux[1]);
+        send_packet(sockfd, pack, servaddr);
+        pack.TO = 0;
+    }
+    else if(ADAPTIVE == 0){
+        send_packet(sockfd, pack, servaddr);
+    }
+    /*
+     * READ LOCK DELLA VARIABILE TIMEOUT
+     */
+    res = pthread_rwlock_rdlock(&to_rwlock);
+    if(res != 0){
+        err_handler(who, "rdlock");
+    }
+    res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+    if(res == -1){
+        err_handler("send thread", "settime");
+    }
+    res = pthread_rwlock_unlock(&to_rwlock);
+    if(res != 0){
+        err_handler(who, "rdlock");
+    }
+    /*
+     * FINE invio
+     *///-----------------------------------------------
+     /*
+      * Attesa ACK
+      */
+    while((wnd.sup - wnd.inf) != 0){
+        pthread_mutex_lock(&inf_mux);
+        pthread_cond_wait(&inf_cv, &inf_mux);
+        pthread_mutex_unlock(&inf_mux);
+    }
+    /*
+     * SPEDIZIONE FILE
+     */
+    pack.ack = 0;
+    memset((void*)pack.data, 0, sizeof(DATA_SIZE));
+    while((res = read(fd, (void*)pack.data, DATA_SIZE - 1)) != 0) {
+        if (res == -1) {
+            if (errno != EINTR) {
                 err_handler(who, "read");
             }
         }
-        actread++;
-        actread = actread % DATA_SIZE;
-        if(actread == DATA_SIZE - 1){
-            pack.data[actread] = '\0';
-            actread++;
-            actread = actread % DATA_SIZE;
-            pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-
-            while(send_args.slots[slot] == 1);
-            send_args.ready[slot] = pack;
-            send_args.slots[slot] = 1;
-            slot = (slot + 1)%READY_SIZE;
-
-            memset((void*)pack.data, 0, DATA_SIZE);
+        pack.data[res] = '\0';
+        pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
+        /*if(res < DATA_SIZE - 1){
+            pack.last = 1;
+        }*/
+        /*
+         * Attesa scorrimento finestra spedizione
+         */
+        while(pack.seq_num > wnd.inf + N){
+            pthread_mutex_lock(&inf_mux);
+            pthread_cond_wait(&inf_cv, &inf_mux);
+            pthread_mutex_unlock(&inf_mux);
+        }
+        /*-------------------------------------------------------------------------------------------
+         * LOCK-> gestione finestra
+         */
+        res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+        if(res != 0){
+            err_handler("send thread", "spin_lock");
+        }
+        //Array di pacchetti spediti senza ACK
+        //In caso di TIMEOUT ritrasmessi da RETRANSMISSION_THREAD
+        wnd.wnd_buff[pack.seq_num % N] = pack;
+        wnd.acked[pack.seq_num % N] = 0;
+        wnd.sup = pack.seq_num;
+        /*
+         * Se TIMEOUT ADATTATIVO
+         *
+         * controlla se dare inizio a un nuovo calcolo del TO
+         * (mutex_trylock (to_mux[0]) -> sbloccato da ack_thread quando riceve ACK del sample_rtt precedente e calcola TO)
+         *
+         * indica ad ack_thread: quale pacchetto usato per calcolo SAMPLE_RTT (to_snum)
+         *                       istante di invio (send_t)
+         *                       avvenuto invio del pacchetto sample (unlock -> to_mux[1])
+         *
+         */
+        if(ADAPTIVE == 1){
+            if((pthread_mutex_trylock(&to_mux[0])) == 0){
+                if(AUDIT_TO){
+                    printf("\nsending sample_rtt packet %d\n", pack.seq_num);
+                    res = pthread_rwlock_rdlock(&to_rwlock);
+                    if(res != 0){
+                        err_handler(who, "rdlock");
+                    }
+                    printf("\nTO: sec %ld, nsec %ld\n", timeout.it_value.tv_sec, timeout.it_value.tv_nsec);
+                    res = pthread_rwlock_unlock(&to_rwlock);
+                    if(res != 0){
+                        err_handler(who, "rdlock");
+                    }
+                }
+                to_snum = pack.seq_num;
+                pack.TO = 1;
+                clock_gettime(CLOCK_MONOTONIC, &send_t);
+                pthread_mutex_unlock(&to_mux[1]);
+            }
+        }
+        send_packet(sockfd, pack, servaddr);
+        if(ADAPTIVE == 1){
+            pack.TO = 0;
+        }
+        /*
+         * Avvio timer TIMEOUT
+         */
+        res = pthread_rwlock_rdlock(&to_rwlock);
+        if(res != 0){
+            err_handler(who, "rdlock");
+        }
+        res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+        if(res == -1){
+            err_handler("send thread", "settime");
+        }
+        res = pthread_rwlock_unlock(&to_rwlock);
+        if(res != 0){
+            err_handler(who, "rdlock");
+        }
+        res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+        if(res != 0){
+            err_handler("send thread", "spin_unlock");
+        }
+        /*
+         * Unlock risorse
+         *///------------------------------------------------------------------------------------------------------
+    }
+    if(pack.last != 1){
+        pack.last = 1;
+        pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
+        while(pack.seq_num > wnd.inf + N){
+            pthread_mutex_lock(&inf_mux);
+            pthread_cond_wait(&inf_cv, &inf_mux);
+            pthread_mutex_unlock(&inf_mux);
+        }
+        res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+        if(res != 0){
+            err_handler("send thread", "spin_lock");
+        }
+        wnd.wnd_buff[pack.seq_num % N] = pack;
+        wnd.acked[pack.seq_num % N] = 0;
+        wnd.sup = pack.seq_num;
+        send_packet(sockfd, pack, servaddr);
+        res = pthread_rwlock_rdlock(&to_rwlock);
+        if(res != 0){
+            err_handler(who, "rdlock");
+        }
+        res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+        if(res == -1){
+            err_handler("send thread", "settime");
+        }
+        res = pthread_rwlock_unlock(&to_rwlock);
+        if(res != 0){
+            err_handler(who, "unlock");
+        }
+        res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+        if(res != 0){
+            err_handler("send thread", "spin_unlock");
         }
     }
-    pack.last = 1;
-    pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-
-    while(send_args.slots[slot] == 1);
-    send_args.ready[slot] = pack;
-    send_args.slots[slot] = 1;
-
-    for(int i=0;i<2;i++){
-        pthread_join(tid[i], NULL);
-    }
-    printf("\nClient FILE %s sent\n", filename);///ASPETTA CONFERMA DA SERVER(manda ACK)
+    pthread_join(tid, NULL);//Aspetta conferma da Server e chiusura connesione (ack_thread)
+    printf("\nClient FILE %s sent\n", filename);
     kill(ppid, SIGUSR1);
     exit(0);
 }
@@ -518,9 +493,6 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     struct window wnd;
     int var;
     int n;
-    struct timespec start_time = {0,0};
-    struct timespec end_time = {0, 0};
-    struct timespec sample_RTT = {0, 0};
 
     char buff[1024];
     struct packet pack;//pacchetto per riceve FILE dal SERVER (e inviare filename)
@@ -564,28 +536,10 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
      *                                                          (#SEQ SERVER aumenterà con ricezione FILE)
      *                                                           (#SEQ CLIENT aumenterà solo per mandare FILENAME)
      */
-    res = handshake_client(sockfd, &ack_pack, &servaddr);
+    res = handshake_client(sockfd, &ack_pack, &servaddr, NULL);
     if(res == -1){
         err_handler(who, "handshake_client");
     }
-/*
-    s_stdo.sem_num = 0;
-    s_stdo.sem_op = 1;
-    s_stdo.sem_flg = 0;
-
-    filename = (char *)malloc(MAX_FILENAME_SIZE);
-    if(filename == NULL) {
-        err_handler(who, "malloc");
-    }
-
-    printf("\nEnter filename to get: ");
-
-    getfrom_stdin(filename, "Enter filename to get: ", who, "scanf");
-    res = semop(sem_stdout, &s_stdo, 1);
-    if(res == -1){
-        err_handler(who, "semop");
-    }
-*/
     res = sprintf(pack.data, "%s", filename);///ULTIMO PACCHETTO HANDSHAKE CHE OLTRE ACK CONTIENE FILENAME
     if(res < 0){
         err_handler(who, "sprintf");
@@ -594,28 +548,18 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     pack.ack_num = ack_pack.ack_num;// #ACK relativo a #SEQ pacchetto SERVER in attesa dell' ACK
     pack.ack = 1;                 ///indica che pacchetto contiene ACK
 
-    if(ADAPTIVE == 1){
-
-
-        if(clock_gettime(CLOCK_MONOTONIC_RAW,&start_time) == -1)
-            err_handler("get function","clock gettime");
-        //prendo il tempo iniziale all'invio del pack
-    }
-
-    send_packet(sockfd, pack, servaddr);////////GESTIRE PERDITA
-
-
- /*
- * ACK DAL SERVER E CONFERMA ESISTENZA FILE
- *
- */
-    struct timespec connection_timeout = {DEF_TO_SEC,0};
+    wnd.inf = pack.ack_num;
+    send_packet(sockfd, pack, servaddr);
+    /*
+    * ACK DAL SERVER E CONFERMA ESISTENZA FILE
+    *
+    */
+    struct timespec connection_timeout = {2,0};
     int attempts = 0;
     len = sizeof(servaddr);
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
-        err_handler(who, "setsockopt");
+        err_handler("Get function", "setsockopt");
     }
-
     while(recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, (struct sockaddr *)&servaddr, &len) < 0){
         if(errno != EINTR){
             if(errno == EWOULDBLOCK){
@@ -635,103 +579,47 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
             }
         }
     }
-    if(clock_gettime(CLOCK_MONOTONIC_RAW,&end_time) == -1)
-        err_handler(who,"clock gettime");
-
-    if(ADAPTIVE == 1){
-
-
-        //prendo il tempo finale alla ricezione dell'ack
-
-        double sec = difftime(end_time.tv_sec,start_time.tv_sec);
-        //long old_estimated = estimated;
-        long nsec = end_time.tv_nsec - start_time.tv_nsec;
-        long secn = sec*(1.0e9);
-
-        long time_tot = secn + nsec;
-
-
-        if(time_tot >(3*(1.0e6)) || time_tot<(1*(1.0e6))){
-            SAMPLE_RTT_SEC = DEF_TO_SEC;
-            SAMPLE_RTT_NSEC = DEF_TO_NSEC;
-        }else{
-            SAMPLE_RTT_SEC = time_tot/(1.0e9);
-            if(SAMPLE_RTT_SEC > 0){
-                SAMPLE_RTT_NSEC = time_tot - (SAMPLE_RTT_SEC*(1.0e9));
-            }
-            else{
-                SAMPLE_RTT_NSEC = time_tot;
-            }
-        }
-
-/*
-        double alpha = 0.125;
-        double beta = 0.250;
-
-        estimated = ((1-alpha)*(old_estimated)) + ((alpha)*(time_tot));
-        deviance = ((1-beta)*(deviance)) + (beta*(labs(time_tot - estimated)));
-        time_tot = estimated + (4*deviance);
-
-*/
-        ///sample_RTT.tv_sec = sec;
-        ////sample_RTT.tv_nsec = nsec;
-
-        //connection_timeout = sample_RTT;
-        connection_timeout.tv_sec = SAMPLE_RTT_SEC;
-        connection_timeout.tv_nsec = SAMPLE_RTT_NSEC;
-        printf("\n SAMPLE_RTT_SEC  %ld\n\n",SAMPLE_RTT_SEC);
-        printf("\n SAMPLE_RTT_NSEC  %ld\n\n",SAMPLE_RTT_NSEC);
-
-
-
-    }else{
-
-        connection_timeout.tv_sec = 0;
-        connection_timeout.tv_nsec = 0;
-    }
-
-
+    connection_timeout.tv_sec = 0;
+    connection_timeout.tv_nsec = 0;
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
         err_handler("Handshake", "setsockopt");
     }
-
-      /*
-    len = sizeof(servaddr);
-    res = recvfrom(sockfd, (void *)&pack, sizeof(pack), 0, (struct sockaddr *)&servaddr, &len);
-    if (res < 0) {
-        exit(-1);
-    }
-       */
-    if (pack.ack == 1) {
-        if (pack.ack_num != ack_pack.seq_num + 1) {
-            printf("\nwrong ACK number from SERVER\n");
-            kill(ppid, SIGUSR1);
-            exit(-1);
-        }
-        if(pack.seq_num != ack_pack.ack_num + 1){
-            printf("\nwrong SEQ number from SERVER\n");
-            kill(ppid, SIGUSR1);
-            exit(-1);
-        }
-    }
-    else if(pack.ack == 0){
+    if(pack.ack == 0 && pack.fin == 1){
         printf("\nMessage from SERVER: FILE %s does not exist\n", filename);
+        if(confirm_close_connection(sockfd,servaddr) == 0){
+            if(AUDIT == 1) {
+                printf("\nconnection closed correctly.ACK_THREAD EXIT\n");
+            }
+        } else {
+            if (AUDIT == 1) {
+                printf("\nerror in close connection.ACK_THREAD EXIT\n");
+            }
+        }
         kill(ppid, SIGUSR1);
         exit(0);
     }
     /*
      * SE FILE ESISTE PACK CONTERRA GIA PRIMO PEZZO FILE
      */
+    wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
+    wnd.acked[pack.seq_num % N] = 1;
     ack_pack.ack_num = pack.seq_num;
     ack_pack.ack = 1;//////////////////DA QUI IN POI ACK_PACK USATO SOLO PER ACK
-    printf("\ninviato ACK: %d\n", pack.seq_num);//todo
+    if(ADAPTIVE == 1){
+        if(pack.TO == 1){
+            ack_pack.TO = 1;
+            if(AUDIT_TO == 1){
+                printf("\nACK TO packet %d", ack_pack.ack_num);
+            }
+        }
+    }
     send_ctrl_packet(sockfd, ack_pack, servaddr);
-
+    ack_pack.TO = 0;
     /*
      * FINESTRA RICEZIONE INIZIALIZZAZZIONE
      */
     wnd.sup = pack.seq_num;//SUP -> #SEQ (entro limiti finestra) MAGGIORE TRA I PACCHETTI RICEVUTI(anche fuori ordine)
-    wnd.inf = pack.seq_num;//INF -> ULTIMO PACCHETTO RICEVUTO IN ORDINE E LETTO
+    //wnd.inf = pack.seq_num;//INF -> ULTIMO PACCHETTO RICEVUTO IN ORDINE E LETTO
     /*
      * CREAZIONE FILE => AGGIUNGERE RICHIESTA SOVRASCRITTURA SE GIA ESISTE NEL CLIENT???
      */
@@ -750,206 +638,401 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     if(file == NULL){
         err_handler(who, "fdopen");
     }
-    res = fprintf(file, "%s", pack.data);
-    if(res < 0){
-        err_handler(who, "fprintf");
+    if(pack.seq_num == wnd.inf + 1) {
+        res = fprintf(file, "%s", pack.data);
+        if (res < 0) {
+            err_handler(who, "fprintf");
+        }
+        fflush(file);
+        if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
+            printf("\nServer saved %s successfully\n", path);
+            if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
+                if(AUDIT == 1){
+                    printf("\nconnection closed correctly\n");
+                }
+                exit(0);
+            } else{
+                if(AUDIT == 1){
+                    printf("\nerror in close connection\n");
+                }
+                exit(-1);
+            }
+        }
+        wnd.acked[(wnd.inf + 1) % N] = 0;
+        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
     }
-    fflush(file);
     /*
      * RICEZIONE, SCRITTURA E ACK RESTO DEL FILE DAL SERVER
      *
      */
-     while(1){
-         memset((void*)pack.data, 0, sizeof(DATA_SIZE));
-         res = recvfrom(sockfd, (void*)&pack, sizeof(pack), 0,
-                        (struct sockaddr *)&servaddr, &len);
-         if(AUDIT == 1) {
-             printf("\nricevuto pack: %d\n", pack.seq_num);
-         }
-         if(res < 0){
-             err_handler(who, "recvfrom");
-         }
-         if(((wnd.inf + N) % MAX_SEQ_NUM) > wnd.inf){
-             if((pack.seq_num <= wnd.inf + N) && (pack.seq_num > wnd.inf)){
-                 if(pack.seq_num > wnd.sup){
-                     wnd.sup = pack.seq_num;
-                 }
-                 wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
-                 wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
-                 ack_pack.ack_num = pack.seq_num;
-                 sleep(1);//todo
-                 send_ctrl_packet(sockfd, ack_pack, servaddr);
-                 if(pack.seq_num == wnd.inf + 1){
-                     while((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)){
-                         res = fprintf(file, "%s", wnd.wnd_buff[(wnd.inf+1)%N].data);
-                         if(AUDIT == 1) {
-                             printf("\nscritto: %d\n", wnd.inf + 1);
-                         }
-                         if(res < 0){
-                             err_handler(who, "fprintf");
-                         }
-                         fflush(file);
-                         if(wnd.wnd_buff[(wnd.inf+1)%N].last == 1){
-                             printf("\nClient saved %s successfully\n", path);
-                             kill(ppid,SIGUSR1);
-                             ack_pack.ack = 0;
-                             ack_pack.fin = 1;
-                             send_ctrl_packet(sockfd, ack_pack, servaddr);//ASPETTA CONFERMA CHIUSURA
-                             //exit(0);
-                             /*
-                              * EXIT VA TOLTO PER PERMETTERE DI INVIARE GLI ACK PERSI
-                              * ANCHE SE FILE SALVATO CORRETTAMENTE
-                              */
-                         }
-                         wnd.acked[(wnd.inf + 1) % N] = 0;//--------------------------------------------
-                         wnd.inf = (wnd.inf + 1)%MAX_SEQ_NUM;
+    struct timespec rcv_timeout = {MAX_WAITING_TIME_SEC,0};
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&rcv_timeout, sizeof(rcv_timeout))<0){
+        err_handler("Get function", "setsockopt");
+    }
+    while (1) {
+        while(recvfrom(sockfd, (void *) &pack, sizeof(pack), 0,(struct sockaddr *) &servaddr, &len) < 0) {
+            if(errno != EINTR){
+                if(errno == EWOULDBLOCK){
+                    printf("\nServer stopped sending for too long. Closing connection\n");
+                    if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
+                        if(AUDIT == 1){
+                            printf("\nconnection closed correctly\n");
+                        }
+                        exit(0);
+                    } else{
+                        if(AUDIT == 1){
+                            printf("\nerror in close connection\n");
+                        }
+                        exit(-1);
+                    }
+                }
+                else{
+                    err_handler("Get function", "recvfrom");
+                }
+            }
+        }
+        if(AUDIT == 1) {
+            printf("\nricevuto pack: %d\n", pack.seq_num);
+        }
+        if (((wnd.inf + N) % MAX_SEQ_NUM) > wnd.inf) {
+            if ((pack.seq_num <= wnd.inf + N) && (pack.seq_num > wnd.inf)) {
+                if (pack.seq_num > wnd.sup) {
+                    wnd.sup = pack.seq_num;
+                }
+                wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
+                wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
+                ack_pack.ack_num = pack.seq_num;
+                if(ADAPTIVE == 1){
+                    if(pack.TO == 1){
+                        ack_pack.TO = 1;
+                        if(AUDIT_TO == 1){
+                            printf("\nACK TO packet %d", ack_pack.ack_num);
+                        }
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                        ack_pack.TO = 0;
+                    } else {
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                    }
+                } else {
+                    send_ctrl_packet(sockfd, ack_pack, servaddr);
+                }
+                if (pack.seq_num == wnd.inf + 1) {
+                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)) {
+                        //scrivi su file(ACKED A 0) da wnd_buff THREAD
+                        res = fprintf(file, "%s", wnd.wnd_buff[(wnd.inf + 1) % N].data);
+                        if(AUDIT == 1) {
+                            printf("\nscritto: %d\n", wnd.inf + 1);
+                        }
+                        if (res < 0) {
+                            err_handler(who, "fprintf");
+                        }
+                        //fflush(file);
+                        if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
+                            printf("\nClient saved %s successfully\n", path);
+                            if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
+                                if(AUDIT == 1){
+                                    printf("\nconnection closed correctly\n");
+                                }
+                                exit(0);
+                            } else{
+                                if(AUDIT == 1){
+                                    printf("\nerror in close connection\n");
+                                }
+                                exit(-1);
+                            }
+                        }
+                        wnd.acked[(wnd.inf + 1) % N] = 0;
+                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
 
-                     }
-                 }
-             }
-             else if(pack.seq_num <= wnd.inf){
-                 ack_pack.ack_num = pack.seq_num;
-                 send_ctrl_packet(sockfd, ack_pack, servaddr);
-             }
-         }
-         else if(((wnd.inf + N) % MAX_SEQ_NUM) < wnd.inf){ //todo per limite del file;
-             if(pack.seq_num < ((wnd.inf + N)%MAX_SEQ_NUM)){
-                 if(wnd.sup >= wnd.inf) {
-                     wnd.sup = pack.seq_num;
-                 }
-                 else if(pack.seq_num > wnd.sup){
-                     wnd.sup = pack.seq_num;
-                 }
-                 wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
-                 wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
-                 ack_pack.ack_num = pack.seq_num;
-                 send_ctrl_packet(sockfd, ack_pack, servaddr);
-                 if(pack.seq_num == ((wnd.inf + 1)%MAX_SEQ_NUM)){
-                     var = wnd.sup;
-                     if(wnd.sup < wnd.inf){
-                         var = MAX_SEQ_NUM + wnd.sup;
-                     }
-                     while((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)){
-                         //scrivi su file(ACKED A 0) da wnd_buff THREAD
-                         wnd.inf = (wnd.inf + 1)%MAX_SEQ_NUM;
-                         if(wnd.sup > wnd.inf){
-                             var = wnd.sup;
-                         }
+                    }
+                }
+            } else if (pack.seq_num <= wnd.inf) {
+                ack_pack.ack_num = pack.seq_num;
+                if(ADAPTIVE == 1){
+                    if(pack.TO == 1){
+                        ack_pack.TO = 1;
+                        if(AUDIT_TO == 1){
+                            printf("\n#SEQ<=INF; ACK TO packet %d", ack_pack.ack_num);
+                        }
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                        ack_pack.TO = 0;
+                    } else {
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                    }
+                }
+                else{
+                    send_ctrl_packet(sockfd, ack_pack, servaddr);
+                }
+            }
+        } /*else if (((wnd.inf + N) % MAX_SEQ_NUM) < wnd.inf) {
+            if (pack.seq_num < ((wnd.inf + N) % MAX_SEQ_NUM)) {
+                if (wnd.sup >= wnd.inf) {
+                    wnd.sup = pack.seq_num;
+                } else if (pack.seq_num > wnd.sup) {
+                    wnd.sup = pack.seq_num;
+                }
+                wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
+                wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
+                ack_pack.ack_num = pack.seq_num;
+                send_ctrl_packet(sockfd, ack_pack, addr);
+                if (pack.seq_num == ((wnd.inf + 1) % MAX_SEQ_NUM)) {
+                    var = wnd.sup;
+                    if (wnd.sup < wnd.inf) {
+                        var = MAX_SEQ_NUM + wnd.sup;
+                    }
+                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)) {
+                        //scrivi su file(ACKED A 0) da wnd_buff THREAD
+                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
+                        if (wnd.sup > wnd.inf) {
+                            var = wnd.sup;
+                        }
 
-                     }
-                 }
-             }
-             else if(pack.seq_num > wnd.inf){
-                 if(wnd.sup >= wnd.inf) {
-                     if(pack.seq_num > wnd.sup) {
-                         wnd.sup = pack.seq_num;
-                     }
-                 }
-                 wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
-                 wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
-                 ack_pack.ack_num = pack.seq_num;
-                 send_ctrl_packet(sockfd, ack_pack, servaddr);
-                 if(pack.seq_num == wnd.inf + 1){
-                     var = wnd.sup;
-                     if(wnd.sup < wnd.inf){
-                         var = MAX_SEQ_NUM + wnd.sup;
-                     }
-                     while((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)){
-                         //scrivi su file(ACKED A 0) da wnd_buff THREAD
-                         wnd.inf = (wnd.inf + 1)%MAX_SEQ_NUM;
-                         if(wnd.sup > wnd.inf){
-                             var = wnd.sup;
-                         }
-                     }
-                 }
-             }
-             else if((pack.seq_num <= wnd.inf) && (pack.seq_num >= wnd.inf - N)){
-
-                 //IF FIN = 1 CHIUSURA
-                 ack_pack.ack_num = pack.seq_num;
-                 send_ctrl_packet(sockfd, ack_pack, servaddr);
-             }
-         }
+                    }
+                }
+            } else if (pack.seq_num > wnd.inf) {
+                if (wnd.sup >= wnd.inf) {
+                    if (pack.seq_num > wnd.sup) {
+                        wnd.sup = pack.seq_num;
+                    }
+                }
+                wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
+                wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
+                ack_pack.ack_num = pack.seq_num;
+                send_ctrl_packet(sockfd, ack_pack, addr);
+                if (pack.seq_num == wnd.inf + 1) {
+                    var = wnd.sup;
+                    if (wnd.sup < wnd.inf) {
+                        var = MAX_SEQ_NUM + wnd.sup;
+                    }
+                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < var)) {
+                        //scrivi su file(ACKED A 0) da wnd_buff THREAD
+                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
+                        if (wnd.sup > wnd.inf) {
+                            var = wnd.sup;
+                        }
+                    }
+                }
+            } else if ((pack.seq_num <= wnd.inf) && (pack.seq_num >= wnd.inf - N)) {
+                ack_pack.ack_num = pack.seq_num;
+                send_ctrl_packet(sockfd, ack_pack, addr);
+            }
+        }*/
      }
 }
 
+//rilascio alla fine semaforo??
+//SOSTITUIRE EXIT CON RETURN TODO
+void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
+    int len, res;
+    char **filename_list;
+    struct ctrl_packet ack_pack;
+    struct window wnd;
+    struct packet pack;
+    struct sembuf s_stdo, w_stdo;
+
+    srand(time(0));
+
+    memset((void*)&ack_pack, 0, sizeof(ack_pack));
+    memset((void*)&pack, 0, sizeof(pack));
+    memset((void*)&wnd, 0, sizeof(wnd));
+
+    len = sizeof(servaddr);
+
+    for(int n=0;n<N;n++){
+        wnd.acked[n] = 0;
+    }
+    s_stdo.sem_num = 0;
+    s_stdo.sem_op = 1;
+    s_stdo.sem_flg = 0;
+
+    filename_list = malloc(sizeof(char *)*NUM_FILENAME_IN_PACK);
+    if(filename == NULL) {
+        err_handler(who, "malloc");
+    }
+    for(int n=0;n<NUM_FILENAME_IN_PACK;n++){
+        filename_list[n] = (char *)malloc(MAX_FILENAME_SIZE);
+    }
+
+    ack_pack.cmd = 3;
+    res = handshake_client(sockfd, &ack_pack, &servaddr, NULL);
+    if(res == -1){
+        err_handler(who, "handshake_client");
+    }
+    /*
+     * ultimo ACK HANDSHAKE
+     */
+    ack_pack.seq_num = ack_pack.seq_num + 1;
+    ack_pack.ack_num = ack_pack.ack_num;
+    ack_pack.ack = 1;
+
+    wnd.inf = ack_pack.ack_num;
+    wnd.sup = ack_pack.ack_num;//TODO
+
+    send_ctrl_packet(sockfd, ack_pack, servaddr);
+
+    printf("\n\n-----LIST OF FILES-----\n\n")
+
+    int num = 1;
+    struct timespec rcv_timeout = {MAX_WAITING_TIME_SEC,0};
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&rcv_timeout, sizeof(rcv_timeout))<0){
+        err_handler("List function", "setsockopt");
+    }
+    while(1) {
+        while (recvfrom(sockfd, (void *) &pack, sizeof(pack), 0, (struct sockaddr *) &servaddr, &len) < 0) {
+            if (errno != EINTR) {
+                if (errno == EWOULDBLOCK) {
+                    printf("\nServer stopped sending for too long. Closing connection\n");
+                    if (start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0) {
+                        if (AUDIT == 1) {
+                            printf("\nconnection closed correctly\n");
+                        }
+                        exit(0);
+                    } else {
+                        if (AUDIT == 1) {
+                            printf("\nerror in close connection\n");
+                        }
+                        exit(-1);
+                    }
+                } else {
+                    err_handler("List function", "recvfrom");
+                }
+            }
+        }
+        if (AUDIT == 1) {
+            printf("\nricevuto pack: %d\n", pack.seq_num);
+        }
+        if (((wnd.inf + N) % MAX_SEQ_NUM) > wnd.inf) {
+            if ((pack.seq_num <= wnd.inf + N) && (pack.seq_num > wnd.inf)) {
+                if (pack.seq_num > wnd.sup) {
+                    wnd.sup = pack.seq_num;
+                }
+                wnd.wnd_buff[pack.seq_num % N] = pack;//send ACK
+                wnd.acked[pack.seq_num % N] = 1;// INIZIALIZZA TUTTI A 0
+                ack_pack.ack_num = pack.seq_num;
+                if (ADAPTIVE == 1) {
+                    if (pack.TO == 1) {
+                        ack_pack.TO = 1;
+                        if (AUDIT_TO == 1) {
+                            printf("\nACK TO packet %d", ack_pack.ack_num);
+                        }
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                        ack_pack.TO = 0;
+                    } else {
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                    }
+                } else {
+                    send_ctrl_packet(sockfd, ack_pack, servaddr);
+                }
+                if (pack.seq_num == wnd.inf + 1) {
+                    while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)) {
+                        /*
+                         * LEGGI PACCHETTO TODO
+                         */
+                        filename_list = wnd.wnd_buff[(wnd.inf + 1) % N].data;
+                        for(int n=0;n<NUM_FILENAME_IN_PACK;n++){
+                            printf("%d. %s\n", num, filename_list[n]);
+                            num++;
+                        }
+                        if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {
+                            printf("\n-----END OF LIST-----\n\n", path);
+                            if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
+                                if(AUDIT == 1){
+                                    printf("\nconnection closed correctly\n");
+                                }
+                                exit(0);
+                            } else{
+                                if(AUDIT == 1){
+                                    printf("\nerror in close connection\n");
+                                }
+                                exit(-1);
+                            }
+                        }
+                        wnd.acked[(wnd.inf + 1) % N] = 0;
+                        wnd.inf = (wnd.inf + 1) % MAX_SEQ_NUM;
+                    }
+                }
+            } else if (pack.seq_num <= wnd.inf) {
+                ack_pack.ack_num = pack.seq_num;
+                if (ADAPTIVE == 1) {
+                    if (pack.TO == 1) {
+                        ack_pack.TO = 1;
+                        if (AUDIT_TO == 1) {
+                            printf("\n#SEQ<=INF; ACK TO packet %d", ack_pack.ack_num);
+                        }
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                        ack_pack.TO = 0;
+                    } else {
+                        send_ctrl_packet(sockfd, ack_pack, servaddr);
+                    }
+                }
+            }
+        }
+        /*
+         * MAX_SEQ_NUM TODO
+         */
+    }
+}
+
+/*
+ * crea un file di prova.
+ *
+ * la dimensione del file è pari a circa D volte quella di un singolo pacchetto
+ */
+void write_file(){
+    unsigned int D;
+    char *filename;
+    char buff[1024];
+    char data[DATA_SIZE];
+    int fd;
+    int res;
+    FILE *file;
+
+    /*
+     * D = 16846 -> 25MB FILE
+     * D = 33693 -> 50MB FILE
+     */
+    D = 16846;
+
+    int i = 0;
+    for(int n=0;n<DATA_SIZE-1;n++){
+        //data[n] = 'a';
+        sprintf(&data[n], "%d", i);
+        i = (i+1)%10;
+    }
+    data[DATA_SIZE - 1] = '\0';
+
+    filename = (char *)malloc(MAX_FILENAME_SIZE);
+    if(filename == NULL) {
+        err_handler("Write", "malloc");
+    }
+
+    printf("\nEnter filename to create: ");
+
+    getfrom_stdin(filename, "Enter filename to create: ", "Write", "scanf");
+    sprintf(buff, "./client_files/%s", filename);
+    while((fd = open(buff, O_RDWR|O_CREAT|O_TRUNC, 0666)) == -1){
+        if(errno != EINTR){
+            err_handler("Write", "open");
+        }
+    }
+    file = fdopen(fd, "w+");
+    if (file == NULL) {
+        err_handler("Write", "fdopen");
+    }
+    for(int n=0;n<D;n++){
+        res = fprintf(file, "%s", data);
+        fflush(file);
+    }
+    fclose(file);
+    close(fd);
+    printf("\nfile %s created, DIM: %d X %d",filename, D, DATA_SIZE);
+}
 /*
  * CLIENT CREA SOCKET PER MANDARE RICHIESTA AL SERVER SU #PORTA E IP PRESTABILITI
  *
  * servaddr utilizzato successivamente nella funzione "send_packet" per mandare pacchetti al server
  * ( contiene #PORTA E IP del SERVER )
  */
-
-void list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
-    char who[20];
-    char buff[1024];
-    int len, res, n;
-    struct packet pack;
-    struct sembuf s_stdo, w_stdo;
-    struct ctrl_packet ctrl_pack;
-    struct window wnd;
-    pid_t ppid;
-
-    memset((void*)&ctrl_pack, 0, sizeof(ctrl_pack));
-    memset((void*)&pack, 0, sizeof(pack));
-    memset((void*)&wnd, 0 , sizeof(wnd));
-
-    for (n=0; n<N; n++){
-        wnd.acked[n]=0;
-    }
-
-    sprintf(who, "%s","client LIST");
-    ctrl_pack.cmd = 3;
-
-    res = handshake_client(sockfd, &ctrl_pack, &servaddr);
-    if (res == -1){
-        err_handler(who, "handshake_client");
-    }
-    printf("\nRequest forwarded");
-    res = sprintf(pack.data, "%s", 0);// ultimo ack handshake
-    if(res <0){
-        err_handler(who, "sprintf");
-    }
-
-    pack.seq_num = ctrl_pack.seq_num +1;
-    pack.ack_num = ctrl_pack.ack_num;
-    pack.ack = 1;
-
-    send_packet(sockfd, pack, servaddr); //gestione dell'arrivo dell'ordine corretto dei pack
-
-    len = sizeof(servaddr);
-    res = recvfrom(sockfd, (void *)&pack, sizeof(pack), 0,
-                   (struct sockaddr *)&servaddr, &len);
-
-    if (pack.ack == 1) {
-        if (pack.ack_num != ctrl_pack.seq_num + 1) {
-            printf("\nwrong ACK number from SERVER\n");
-            kill(ppid, SIGUSR1);
-            exit(-1);
-        }
-        if(pack.seq_num != ctrl_pack.ack_num + 1){
-            printf("\nwrong SEQ number from SERVER\n");
-            kill(ppid, SIGUSR1);
-            exit(-1);
-        }
-    }else if(pack.ack == 0){// caso nessun file presente
-        printf("\nMessage from SERVER: it is not possible to make a list because there is no file\n");
-        kill(ppid, SIGUSR1);
-        exit(0);
-    }
-    ctrl_pack.ack_num = pack.seq_num;
-    ctrl_pack.ack = 1;
-    printf("\ninviato ACK: %d\n", pack.seq_num);//todo
-    send_ctrl_packet(sockfd, ctrl_pack, servaddr);
-
-   // for (int i=9; i=0; i--){//stampa il contenuto della lista a schermo
-        //if(){//controlla gli elementi parziali del pacchetto finale
-           // printf("%s\n",pack[i]->data);
-       // }
-  //  }
-
-}/////////////////////////////////////
-
 void main(int argc, char *argv[]) {
     if (argc > 2) {
         printf("\nUsage: %s <server IP address>\n", argv[0]);
@@ -1021,6 +1104,7 @@ void main(int argc, char *argv[]) {
             if (sockfd == -1) {
                 err_handler(who, "socket");
             }
+
             pid = fork();
             if (pid == -1) {
                 err_handler(who, "fork");
@@ -1038,26 +1122,43 @@ void main(int argc, char *argv[]) {
             } else if (pid == 0){
                 get_function(sockfd,sem_stdout, servaddr);
             }
-        }else if (strcmp("list", cmd) == 0 ){
+        } else if (strcmp("list", cmd) == 0) {
             sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-            if(sockfd == -1){
+            if (sockfd == -1) {
                 err_handler(who, "socket");
             }
+            //TODO TOGLIERE FORK
             pid = fork();
             if (pid == -1) {
                 err_handler(who, "fork");
-            } else if (pid == 0) {
+            } else if (pid == 0){
                 list_function(sockfd, sem_stdout, servaddr);
             }
-        }else if (strcmp("exit", cmd) == 0) {
+            res = semop(sem_stdout, &s_stdo, 1);
+            if(res == -1){
+                err_handler(who, "semop");
+            }
+        } else if (strcmp("exit", cmd) == 0) {
             printf("\nClosing...\n");
             res = semop(sem_stdout, &s_stdo, 1);
             if(res == -1){
                 err_handler(who, "semop");
             }
             exit(0);
+        } else if (strcmp("write", cmd) == 0) {
+            write_file();
+            res = semop(sem_stdout, &s_stdo, 1);
+            if(res == -1){
+                err_handler(who, "semop");
+            }
+        } else if (strcmp("fill", cmd) == 0) {
+            fill_directory();
+            res = semop(sem_stdout, &s_stdo, 1);
+            if(res == -1){
+                err_handler(who, "semop");
+            }
         } else {
-            printf("\nInvalid command. Possible choices [put, get, list, exit]\n");
+            printf("\nInvalid command. Possible choices [put, get, list, exit] or [write, fill]\n");
             res = semop(sem_stdout, &s_stdo, 1);
             if (res == -1) {
                 err_handler(who, "semop");
