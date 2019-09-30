@@ -2,7 +2,7 @@
 #define UDP_IIW_VARIABLES_H
 
 #define SERV_PORT 1234
-#define ADAPTIVE 0
+#define ADAPTIVE 1
 //1 se TIMEOUT ADATTATIVO 0 altrimenti
 #define BETA 0.25f
 #define ALPHA 0.125f
@@ -15,14 +15,15 @@
 
 #define DEF_TO_SEC 0
 //default timeout seconds
-#define DEF_TO_NSEC 30000000
+#define DEF_TO_NSEC 3000000
 #define MAX_WAITING_TIME_SEC 4
 
 #define CALC_TIMEOUT_THREAD 1
 
-#define TEST 1
+#define TEST 0
 
 #define AUDIT_SEND 1
+#define AUDIT_CONNECTION 0
 #define AUDIT_THR 0
 #define AUDIT_WND 0
 #define AUDIT_ACK 0

@@ -3,7 +3,7 @@
 #ifndef UDP_IIW_DATA_FORMAT_H
 #define UDP_IIW_DATA_FORMAT_H
 
-#define DATA_SIZE 1484
+#define DATA_SIZE 1500
 #define N 80
 #define MAX_SEQ_NUM 60000
 

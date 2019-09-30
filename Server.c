@@ -13,6 +13,10 @@ int handshake_server(int sockfd, struct ctrl_packet *ctrl_pack, struct packet *p
     //sleep(1);
     send_ctrl_packet(sockfd, snd_pack, *addr);
 
+    struct timespec connection_timeout = {5,0};
+    if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+        err_handler("Handshake", "setsockopt");
+    }
     len = sizeof(*addr);
     if (ctrl_pack->cmd == 1 || ctrl_pack->cmd == 2 || ctrl_pack->cmd == 3) {
         /*
@@ -21,10 +25,22 @@ int handshake_server(int sockfd, struct ctrl_packet *ctrl_pack, struct packet *p
          * IN OGNI CASO DOPO RECVFROM -> FILENAME RICEVUTO
          * SE ACK NON ARRIVA AL CLIENT VERRA RISPEDITO SENZA LEGGERE ANCORA FILENAME
          */
-        res = recvfrom(sockfd, (void *) pack, sizeof(*pack), 0,
-                       (struct sockaddr *) addr, &len);
+        res = recvfrom(sockfd, (void *) pack, sizeof(*pack), 0, (struct sockaddr *) addr, &len);
         if (res < 0) {
-            return -1;
+            if(errno != EINTR){
+                if(errno == EWOULDBLOCK){
+                    printf("\nClient stopped sending. Closing connection\n");
+                    return -1;
+                }
+                else{
+                    err_handler("Handshake", "recvfrom");
+                }
+            }
+        }
+        connection_timeout.tv_sec = 0;
+        connection_timeout.tv_nsec = 0;
+        if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
+            err_handler("Handshake", "setsockopt");
         }
         if (pack->ack == 1) {
             if (pack->ack_num != snd_pack.seq_num) {
@@ -452,9 +468,43 @@ void get_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr
         }
         pack.data[res] = '\0';
         pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-        /*if(res < DATA_SIZE - 1){
+        if(pack.seq_num == MAX_SEQ_NUM - N - 100){
             pack.last = 1;
-        }*/
+            while (pack.seq_num > wnd.inf + N) {
+                pthread_mutex_lock(&inf_mux);
+                pthread_cond_wait(&inf_cv, &inf_mux);
+                pthread_mutex_unlock(&inf_mux);
+            }
+            res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+            if (res != 0) {
+                err_handler("send thread", "spin_lock");
+            }
+            wnd.wnd_buff[pack.seq_num % N] = pack;
+            wnd.acked[pack.seq_num % N] = 0;
+            wnd.sup = pack.seq_num;
+            send_packet(sockfd, pack, addr);
+            res = pthread_rwlock_rdlock(&to_rwlock);
+            if (res != 0) {
+                err_handler(who, "rdlock");
+            }
+            res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+            if (res == -1) {
+                err_handler("send thread", "settime");
+            }
+            res = pthread_rwlock_unlock(&to_rwlock);
+            if (res != 0) {
+                err_handler(who, "unlock");
+            }
+            res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+            if (res != 0) {
+                err_handler("send thread", "spin_unlock");
+            }
+
+            pthread_join(tid, NULL);
+            printf("\nMaximum File size reached, file %s sent partially\n", filename);
+            exit(0);
+
+        }
         /*
          * Attesa scorrimento finestra spedizione
          */
@@ -694,10 +744,47 @@ void list_request_handler(int sockfd, struct packet pack, struct sockaddr_in add
         //sprintf(arr_nomi[j], "%s", namelist[n]);
         j++; //indice dell'array di nomi arr_nomi
         n--; //indice della struct di nomi namelist
-        if(j == NUM_FILENAME_IN_PACK - 1){
+        if(j == NUM_FILENAME_IN_PACK){
             //pack.data = arr_nomi;
             pack.seq_num = (pack.seq_num + 1)%MAX_SEQ_NUM;
 
+            if(pack.seq_num == MAX_SEQ_NUM - N - 100){
+                pack.last = 1;
+                while (pack.seq_num > wnd.inf + N) {
+                    pthread_mutex_lock(&inf_mux);
+                    pthread_cond_wait(&inf_cv, &inf_mux);
+                    pthread_mutex_unlock(&inf_mux);
+                }
+                res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+                if (res != 0) {
+                    err_handler("send thread", "spin_lock");
+                }
+                wnd.wnd_buff[pack.seq_num % N] = pack;
+                wnd.acked[pack.seq_num % N] = 0;
+                wnd.sup = pack.seq_num;
+                send_packet(sockfd, pack, addr);
+                res = pthread_rwlock_rdlock(&to_rwlock);
+                if (res != 0) {
+                    err_handler(who, "rdlock");
+                }
+                res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+                if (res == -1) {
+                    err_handler("send thread", "settime");
+                }
+                res = pthread_rwlock_unlock(&to_rwlock);
+                if (res != 0) {
+                    err_handler(who, "unlock");
+                }
+                res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+                if (res != 0) {
+                    err_handler("send thread", "spin_unlock");
+                }
+
+                pthread_join(tid, NULL);//Aspetta conferma da Server e chiusura connesione (ack_thread)
+                printf("\nMaximum List size reached, list sent partially\n");
+                exit(0);
+
+            }
             while(pack.seq_num > wnd.inf + N){
                 pthread_mutex_lock(&inf_mux);
                 pthread_cond_wait(&inf_cv, &inf_mux);
@@ -799,80 +886,6 @@ void list_request_handler(int sockfd, struct packet pack, struct sockaddr_in add
     close(sockfd);//TODO
     exit(0);
 }
-
-/*
-void list_request_handler(int sockfd, struct packet pack, struct sockaddr_in addr) {
-    int actread;
-    int fd, res;
-    char path[1520], who[11];
-    struct ctrl_packet ctrl_pack;
-    struct window wnd;
-    struct dirent **namelist;
-    int n, k, j = 0;
-    char *arr_nomi[5];
-    unsigned int temp;
-    pthread_t tid[2];
-
-    struct send_thread_args send_args;
-    struct ack_thread_args args[N];
-    struct sigevent sig_to;
-    pthread_spinlock_t locks[N];
-
-    temp = pack.seq_num;
-    pack.seq_num = pack.ack_num;
-    pack.ack_num = temp;
-
-    memset((void *) &ctrl_pack, 0, sizeof(ctrl_pack));
-    memset((void *) &wnd, 0, sizeof(wnd));
-    sprintf(who, "%s", "Server LIST");
-
-    for ( int m = 0; m < 5; m++) {
-        arr_nomi[m] = (char *) malloc(MAX_FILENAME_SIZE);
-    }
-
-    for (int i = 0; i < N; i++) {
-        res = pthread_spin_init(&locks[i], PTHREAD_PROCESS_PRIVATE);
-        if (res != 0) {
-            err_handler(who, "spinlock init");
-        }
-    }
-    k = scandir("./server_files/",&namelist, NULL,alphasort);
-    if (n == -1) {
-        perror("scandir");
-        exit(0);
-    }
-
-    for(int i;i<READY_SIZE;i++){
-        send_args.slots[i] = 0;
-    }
-
-    res = pthread_create(&tid[1], NULL, send_thread, (void*)&send_args);
-    if(res == -1) {
-        err_handler(who, "pthread_create");
-    }
-
-    int slot = 0;
-
-    while(k>0){
-        sprintf(arr_nomi[j], "%s", namelist[k]);
-        j++; //indice dell'array di nomi arr_nomi
-        k--; //indice della struct di nomi namelist
-            if(j==4){
-                pack.data = arr_nomi;
-                pack.seq_num = (pack.seq_num + 1)%MAX_SEQ_NUM;
-
-                while(send_args.slots[slot] == 1);
-                send_args.ready[slot] = pack;
-                send_args.slots[slot] = 1;
-                slot = (slot + 1)%READY_SIZE;
-
-                memset((void*)pack.data, 0, DATA_SIZE);
-
-                j=0; // azzera il riempimento del pacchetto
-            }
-        }
-    }
-*/
 
 int main(int argc, char *argv[]) {
     int listen_sockfd, connection_sockfd;

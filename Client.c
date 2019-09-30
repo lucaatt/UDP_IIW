@@ -11,7 +11,7 @@ void event_handler() {
 }
 /*
  * Serve a stabilire una connessione con il SERVER in ascolto su un #PORTA predefinito
- * che ricevuto il primo mess dal CLIENT genera una nuova SOCKET con diverso #PORTA per
+ * che, ricevuto il primo mess dal CLIENT, genera una nuova SOCKET con diverso #PORTA per
  * gestire più richieste in concorrenza.
  * HANDSHAKE necessario per ottenere nuova PORTA del SERVER, inizializzare #SEQUENZA ecc
  *
@@ -28,10 +28,9 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
     ctrl_pack->syn = 1;
     int len, res;
     struct timespec connection_timeout = {2,0};
-    struct timespec send_time, ack_time;//////////////////////////////////////////
+    struct timespec send_time, ack_time;
     int attempts = 0;
 
-    ////////////////////////////////////////////////////////////////////////////
     if(sample_rtt != NULL) {
         clock_gettime(CLOCK_MONOTONIC, &send_time);
     }
@@ -57,7 +56,7 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
                 attempts++;
                 if(attempts == 4){
                     printf("\n%d attempts to connect with Server. Try again later.\n\n", attempts);
-                    exit(0);
+                    return -1;
                 }
                 printf("\nHandshake attempt number %d. Server not responding...", attempts);
                 connection_timeout.tv_sec = (connection_timeout.tv_sec)*2;
@@ -74,11 +73,9 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
             }
         }
     }
-
-
-/*
- * CALCOLO SAMPLE RTT
- */
+    /*
+    * CALCOLO SAMPLE RTT
+    */
     if(sample_rtt != NULL) {
         clock_gettime(CLOCK_MONOTONIC, &ack_time);
         if (ack_time.tv_nsec - send_time.tv_nsec < 0) {
@@ -89,8 +86,6 @@ int handshake_client(int sockfd, struct ctrl_packet *ctrl_pack, struct sockaddr_
             sample_rtt->tv_nsec = ack_time.tv_nsec - send_time.tv_nsec;
         }
     }
-
-
     connection_timeout.tv_sec = 0;
     connection_timeout.tv_nsec = 0;
     if(setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void*)&connection_timeout, sizeof(connection_timeout))<0){
@@ -238,15 +233,18 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     }
     printf("\nEnter filename to send: ");
     getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
-    res = semop(sem_stdout, &s_stdo, 1);
+    /*res = semop(sem_stdout, &s_stdo, 1);
     if(res == -1){
         err_handler(who, "semop");
-    }
+    }*/
     //Apertura FILE
     sprintf(buff, "./client_files/%s", filename);
     while((fd = open(buff, O_RDONLY)) == -1){
         if(errno != EINTR){
-            err_handler(who, "open");
+            perror("open");
+            printf("\nEnter filename to send: ");
+            getfrom_stdin(filename, "Enter filename to send: ", who, "scanf");
+            sprintf(buff, "./client_files/%s", filename);
         }
     }
     res = sprintf(pack.data, "%s", filename);
@@ -258,16 +256,24 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
      */
     if(ADAPTIVE == 0) {
         res = handshake_client(sockfd, &ctrl_pack, &servaddr, NULL);
+        if(semop(sem_stdout, &s_stdo, 1) == -1){
+            err_handler(who, "semop");
+        }
         if(res == -1){
-            err_handler(who, "handshake_client");
+            //err_handler(who, "handshake_client");
+            exit(0);
         }
         timeout.it_value.tv_sec = DEF_TO_SEC;
         timeout.it_value.tv_nsec = DEF_TO_NSEC;
     }
     else if(ADAPTIVE == 1){
         res = handshake_client(sockfd, &ctrl_pack, &servaddr, &sample_rtt);
+        if(semop(sem_stdout, &s_stdo, 1) == -1){
+            err_handler(who, "semop");
+        }
         if(res == -1){
-            err_handler(who, "handshake_client");
+           // err_handler(who, "handshake_client");
+           exit(0);
         }
         timeout.it_value.tv_sec = sample_rtt.tv_sec;
         timeout.it_value.tv_nsec = sample_rtt.tv_nsec;
@@ -359,9 +365,44 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         }
         pack.data[res] = '\0';
         pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-        /*if(res < DATA_SIZE - 1){
+        if(pack.seq_num == MAX_SEQ_NUM - N - 100){
             pack.last = 1;
-        }*/
+            while (pack.seq_num > wnd.inf + N) {
+                pthread_mutex_lock(&inf_mux);
+                pthread_cond_wait(&inf_cv, &inf_mux);
+                pthread_mutex_unlock(&inf_mux);
+            }
+            res = pthread_mutex_lock(&locks[pack.seq_num % N]);
+            if (res != 0) {
+                err_handler("send thread", "spin_lock");
+            }
+            wnd.wnd_buff[pack.seq_num % N] = pack;
+            wnd.acked[pack.seq_num % N] = 0;
+            wnd.sup = pack.seq_num;
+            send_packet(sockfd, pack, servaddr);
+            res = pthread_rwlock_rdlock(&to_rwlock);
+            if (res != 0) {
+                err_handler(who, "rdlock");
+            }
+            res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
+            if (res == -1) {
+                err_handler("send thread", "settime");
+            }
+            res = pthread_rwlock_unlock(&to_rwlock);
+            if (res != 0) {
+                err_handler(who, "unlock");
+            }
+            res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
+            if (res != 0) {
+                err_handler("send thread", "spin_unlock");
+            }
+
+            pthread_join(tid, NULL);//Aspetta conferma da Server e chiusura connesione (ack_thread)
+            printf("\nMaximum File size reached, FILE %s sent partially\n", filename);
+            kill(ppid, SIGUSR1);
+            exit(0);
+
+        }
         /*
          * Attesa scorrimento finestra spedizione
          */
@@ -440,16 +481,16 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
          * Unlock risorse
          *///------------------------------------------------------------------------------------------------------
     }
-    if(pack.last != 1){
+    if(pack.last != 1) {
         pack.last = 1;
         pack.seq_num = (pack.seq_num + 1) % MAX_SEQ_NUM;
-        while(pack.seq_num > wnd.inf + N){
+        while (pack.seq_num > wnd.inf + N) {
             pthread_mutex_lock(&inf_mux);
             pthread_cond_wait(&inf_cv, &inf_mux);
             pthread_mutex_unlock(&inf_mux);
         }
         res = pthread_mutex_lock(&locks[pack.seq_num % N]);
-        if(res != 0){
+        if (res != 0) {
             err_handler("send thread", "spin_lock");
         }
         wnd.wnd_buff[pack.seq_num % N] = pack;
@@ -457,19 +498,19 @@ void put_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         wnd.sup = pack.seq_num;
         send_packet(sockfd, pack, servaddr);
         res = pthread_rwlock_rdlock(&to_rwlock);
-        if(res != 0){
+        if (res != 0) {
             err_handler(who, "rdlock");
         }
         res = timer_settime(timers[pack.seq_num % N], 0, &timeout, NULL);
-        if(res == -1){
+        if (res == -1) {
             err_handler("send thread", "settime");
         }
         res = pthread_rwlock_unlock(&to_rwlock);
-        if(res != 0){
+        if (res != 0) {
             err_handler(who, "unlock");
         }
         res = pthread_mutex_unlock(&locks[pack.seq_num % N]);
-        if(res != 0){
+        if (res != 0) {
             err_handler("send thread", "spin_unlock");
         }
     }
@@ -512,6 +553,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     struct sembuf s_stdo, w_stdo;
     pid_t ppid;
 
+    ppid = getppid();
     srand(time(0));//NECESSARIO PER GENERARE OGNI VOLTA SEQUENZE DIVERSE DI NUMERI PSEUDORANDOM
 
     memset((void*)&ack_pack, 0, sizeof(ack_pack));
@@ -536,10 +578,10 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     printf("\nEnter filename to get: ");
 
     getfrom_stdin(filename, "Enter filename to get: ", who, "scanf");
-    res = semop(sem_stdout, &s_stdo, 1);
+    /*res = semop(sem_stdout, &s_stdo, 1);
     if(res == -1){
         err_handler(who, "semop");
-    }
+    }*/
 
     ack_pack.cmd = 2;/////////LETTO DA SERVER (VALORE 2 INDICA GET)
     /////CMD USATO IN HANDSHAKE!!!
@@ -550,8 +592,12 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
      *                                                           (#SEQ CLIENT aumenterà solo per mandare FILENAME)
      */
     res = handshake_client(sockfd, &ack_pack, &servaddr, NULL);
+    if(semop(sem_stdout, &s_stdo, 1) == -1){
+        err_handler(who, "semop");
+    }
     if(res == -1){
-        err_handler(who, "handshake_client");
+        //err_handler(who, "handshake_client");
+        exit(0);
     }
     res = sprintf(pack.data, "%s", filename);///ULTIMO PACCHETTO HANDSHAKE CHE OLTRE ACK CONTIENE FILENAME
     if(res < 0){
@@ -582,6 +628,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                 attempts++;
                 if(attempts == 3){
                     printf("\nServer not responding. Closing connection...\n\n");
+                    kill(ppid, SIGUSR1);
                     exit(0);
                 }
                 connection_timeout.tv_sec = (connection_timeout.tv_sec)*2;
@@ -602,6 +649,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     }
     if(pack.ack == 0 && pack.fin == 1){
         printf("\nMessage from SERVER: FILE %s does not exist\n", filename);
+        kill(ppid, SIGUSR1);
         if(confirm_close_connection(sockfd,servaddr) == 0){
             if(AUDIT == 1) {
                 printf("\nconnection closed correctly.ACK_THREAD EXIT\n");
@@ -611,7 +659,6 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                 printf("\nerror in close connection.ACK_THREAD EXIT\n");
             }
         }
-        kill(ppid, SIGUSR1);
         exit(0);
     }
     /*
@@ -662,6 +709,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
         fflush(file);
         if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
             printf("\nServer saved %s successfully\n", path);
+            kill(ppid,SIGUSR1);
             if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
                 if(AUDIT == 1){
                     printf("\nconnection closed correctly\n");
@@ -690,6 +738,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
             if(errno != EINTR){
                 if(errno == EWOULDBLOCK){
                     printf("\nServer stopped sending for too long. Closing connection\n");
+                    kill(ppid,SIGUSR1);
                     if(start_close_connection(sockfd, wnd.inf + 1, servaddr) == 0){
                         if(AUDIT == 1){
                             printf("\nconnection closed correctly\n");
@@ -745,6 +794,7 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                         //fflush(file);
                         if (wnd.wnd_buff[(wnd.inf + 1) % N].last == 1) {/////ESCI SE TUTTO IN BUFF SALVATO
                             printf("\nClient saved %s successfully\n", path);
+                            kill(ppid, SIGUSR1);
                             if(TEST == 1){
                                 clock_gettime(CLOCK_MONOTONIC, &finish_time);
 
@@ -848,8 +898,6 @@ void get_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
      }
 }
 
-//rilascio alla fine semaforo??
-//SOSTITUIRE EXIT CON RETURN TODO
 int list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     int len, res;
     char *filename_list;
@@ -875,13 +923,7 @@ int list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
     s_stdo.sem_op = 1;
     s_stdo.sem_flg = 0;
 
-    /*filename_list = malloc(sizeof(char *)*NUM_FILENAME_IN_PACK);
-    if(filename == NULL) {
-        err_handler(who, "malloc");
-    }
-    for(int n=0;n<NUM_FILENAME_IN_PACK;n++){*/
-        filename_list = (char *)malloc(MAX_FILENAME_SIZE);
-    //}
+    filename_list = (char *)malloc(MAX_FILENAME_SIZE);
 
     ack_pack.cmd = 3;
     res = handshake_client(sockfd, &ack_pack, &servaddr, NULL);
@@ -916,12 +958,12 @@ int list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                         if (AUDIT == 1) {
                             printf("\nconnection closed correctly\n");
                         }
-                        exit(0);
+                        return 0;
                     } else {
                         if (AUDIT == 1) {
                             printf("\nerror in close connection\n");
                         }
-                        exit(-1);
+                        return -1;
                     }
                 } else {
                     err_handler("List function", "recvfrom");
@@ -956,7 +998,7 @@ int list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                 if (pack.seq_num == wnd.inf + 1) {
                     while ((wnd.acked[(wnd.inf + 1) % N] == 1) && (wnd.inf < wnd.sup)) {
                         /*
-                         * LEGGI PACCHETTO TODO
+                         * LEGGI PACCHETTO
                          */
                         filename_list = wnd.wnd_buff[(wnd.inf + 1) % N].data;
                         for(int n=0;n<NUM_FILENAME_IN_PACK;n++){
@@ -999,9 +1041,6 @@ int list_function(int sockfd, int sem_stdout, struct sockaddr_in servaddr){
                 }
             }
         }
-        /*
-         * MAX_SEQ_NUM TODO
-         */
     }
 }
 
@@ -1023,7 +1062,7 @@ void write_file(){
      * D = 16846 -> 25MB FILE
      * D = 33693 -> 50MB FILE
      */
-    D = 16846;
+    D = 33693*3;
 
     int i = 0;
     for(int n=0;n<DATA_SIZE-1;n++){
@@ -1057,8 +1096,28 @@ void write_file(){
     }
     fclose(file);
     close(fd);
-    printf("\nfile %s created, DIM: %d X %d",filename, D, DATA_SIZE);
+    printf("\nfile %s created, DIM: %d X %d\n",filename, D, DATA_SIZE);
 }
+
+/*
+ * Crea F file all'interno della server_files directory, da usare per eseguire dei test con il comando list
+ */
+void fill_directory(){
+    unsigned int F;
+    char *filename;
+    char path[1024];
+
+    F = 100;
+
+    filename = (char *)malloc(MAX_FILENAME_SIZE);
+    for(int n=0;n<F;n++){
+        sprintf(filename, "empty_file%d", n);
+        sprintf(path, "./server_files/%s", filename);
+        creat(path, 0660);
+    }
+    printf("\n%d files created in Server directory\n",F);
+}
+
 /*
  * CLIENT CREA SOCKET PER MANDARE RICHIESTA AL SERVER SU #PORTA E IP PRESTABILITI
  *
@@ -1159,13 +1218,7 @@ void main(int argc, char *argv[]) {
             if (sockfd == -1) {
                 err_handler(who, "socket");
             }
-            //TODO TOGLIERE FORK
-            //pid = fork();
-            //if (pid == -1) {
-             //   err_handler(who, "fork");
-            //} else if (pid == 0){
-                list_function(sockfd, sem_stdout, servaddr);
-            //}
+            list_function(sockfd, sem_stdout, servaddr);
             res = semop(sem_stdout, &s_stdo, 1);
             if(res == -1){
                 err_handler(who, "semop");
@@ -1184,7 +1237,7 @@ void main(int argc, char *argv[]) {
                 err_handler(who, "semop");
             }
         } else if (strcmp("fill", cmd) == 0) {
-            //fill_directory();
+            fill_directory();
             res = semop(sem_stdout, &s_stdo, 1);
             if(res == -1){
                 err_handler(who, "semop");

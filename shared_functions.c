@@ -96,7 +96,7 @@ int start_close_connection(int sockfd, int wnd_inf, struct sockaddr_in addr){
 
     close_pack.ack = 0;
     close_pack.fin = 1;
-    close_pack.seq_num = 123;
+    close_pack.seq_num = 0;
 
     ack_pack.ack = 1;
     ack_pack.fin = 0;
@@ -118,10 +118,14 @@ int start_close_connection(int sockfd, int wnd_inf, struct sockaddr_in addr){
                 if (errno == EWOULDBLOCK) {
                     attempts++;
                     if (attempts == 4) {
-                        printf("\n%d attempts to close connection. EXITING\n\n", attempts);
+                        if(AUDIT_CONNECTION == 1) {
+                            printf("\n%d attempts to close connection. EXITING\n\n", attempts);
+                        }
                         return (-1);
                     }
-                    printf("\nClosing connection attempt number %d. Trying again...\n", attempts);
+                    if(AUDIT_CONNECTION == 1) {
+                        printf("\nClosing connection attempt number %d. Trying again...\n", attempts);
+                    }
                     close_connection_timeout.tv_sec = (close_connection_timeout.tv_sec) * 2;
                     if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void *) &close_connection_timeout,
                                    sizeof(close_connection_timeout)) < 0) {
@@ -158,10 +162,15 @@ int start_close_connection(int sockfd, int wnd_inf, struct sockaddr_in addr){
                         if (errno == EWOULDBLOCK) {
                             attempts++;
                             if (attempts == 3) {
-                                printf("\nWaited %d times for message to close connection.EXITING...\n\n", attempts);
+                                if(AUDIT_CONNECTION == 1) {
+                                    printf("\nWaited %d times for message to close connection.EXITING...\n\n",
+                                           attempts);
+                                }
                                 return (-1);
                             }
-                            printf("\nWaiting for FIN message (attempt %d)...\n", attempts);
+                            if(AUDIT_CONNECTION == 1) {
+                                printf("\nWaiting for FIN message (attempt %d)...\n", attempts);
+                            }
                             close_connection_timeout.tv_sec = (close_connection_timeout.tv_sec) * 2;
                             if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void *) &close_connection_timeout,
                                            sizeof(close_connection_timeout)) < 0) {
@@ -178,7 +187,9 @@ int start_close_connection(int sockfd, int wnd_inf, struct sockaddr_in addr){
                     }
                     close_pack.ack = 1;
                     send_ctrl_packet(sockfd, close_pack, addr);
-                    printf("\nCONNECTION CLOSED. EXITING...\n");
+                    if(AUDIT_CONNECTION == 1) {
+                        printf("\nCONNECTION CLOSED. EXITING...\n");
+                    }
                     return (0);
                 }
             }
@@ -196,11 +207,11 @@ int confirm_close_connection(int sockfd, struct sockaddr_in addr){
 
     close_pack.ack = 1;
     close_pack.fin = 1;
-    close_pack.seq_num = 123;
+    close_pack.seq_num = 0;
 
     close_ctrlpack.fin = 1;
     close_ctrlpack.ack = 0;
-    close_ctrlpack.ack_num = 123;
+    close_ctrlpack.ack_num = 0;
     if(AUDIT == 1){
         printf("\nstart confirm close\n");
     }
@@ -218,10 +229,14 @@ int confirm_close_connection(int sockfd, struct sockaddr_in addr){
                 if (errno == EWOULDBLOCK) {
                     attempts++;
                     if (attempts == 4) {
-                        printf("\n%d attempts to confirm close connection. EXITING\n\n", attempts);
+                        if(AUDIT_CONNECTION == 1) {
+                            printf("\n%d attempts to confirm close connection. EXITING\n\n", attempts);
+                        }
                         return (-1);
                     }
-                    printf("\nConfirming close connection attempt number %d. Trying again...\n", attempts);
+                    if(AUDIT_CONNECTION == 1) {
+                        printf("\nConfirming close connection attempt number %d. Trying again...\n", attempts);
+                    }
                     close_connection_timeout.tv_sec = (close_connection_timeout.tv_sec) * 2;
                     if (setsockopt(sockfd, SOL_SOCKET, SO_RCVTIMEO, (void *) &close_connection_timeout,
                                    sizeof(close_connection_timeout)) < 0) {
@@ -239,7 +254,9 @@ int confirm_close_connection(int sockfd, struct sockaddr_in addr){
             if(AUDIT == 1){
                 printf("\nultimo ACK FIN ricevuto\n");
             }
-            printf("\nCONNECTION CLOSED. EXITING...\n");
+            if(AUDIT_CONNECTION == 1) {
+                printf("\nCONNECTION CLOSED. EXITING...\n");
+            }
             return (0);
         }
     }
@@ -256,11 +273,11 @@ int fnf_close_connection(int sockfd, int wnd_inf, struct sockaddr_in addr){
 
     close_pack.ack = 0;
     close_pack.fin = 1;
-    close_pack.seq_num = 123;
+    close_pack.seq_num = 0;
 
     pack.ack = 0;
     pack.fin = 1;
-    pack.seq_num = 123;
+    pack.seq_num = 0;
 
     ack_pack.ack = 1;
     ack_pack.fin = 0;
